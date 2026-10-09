@@ -383,6 +383,12 @@ def main():
     p.add_argument("--dataset", type=str, default="Stanford",
                     choices=["Stanford"])
     p.add_argument("--data_root", type=str, default="")
+    p.add_argument(
+        "--subjects", type=str, default="",
+        help="Comma-separated Stanford subjects for per_subject mode",
+    )
+    p.add_argument("--raw_root", type=str, default="",
+                   help="Read-only Stanford raw recording root for locs")
     p.add_argument("--val_ratio", type=float, default=0.1)
     p.add_argument("--train_mode", type=str, default="per_subject",
                     choices=["per_subject", "pooled", "finetune"])
@@ -514,13 +520,32 @@ def main():
     # ---- Data loading (Stanford finger trajectories, pre-epoched pickles) ----
     d_out = 5
     subjects = list(STANFORD_SUBJECTS)
+    if args.subjects:
+        if args.train_mode != "per_subject":
+            raise ValueError(
+                "--subjects is supported only in per_subject mode."
+            )
+        subjects = [
+            value.strip() for value in args.subjects.split(",")
+        ]
+        invalid = sorted(set(subjects) - set(STANFORD_SUBJECTS))
+        if (not subjects or any(not value for value in subjects)
+                or len(subjects) != len(set(subjects)) or invalid):
+            raise ValueError(
+                f"Invalid --subjects selection {subjects!r}; "
+                f"unknown={invalid}, duplicates or empty IDs are "
+                "not allowed."
+            )
     file_root = args.data_root if args.data_root else get_data_root()
 
     split = TailSplit(val_ratio=float(args.val_ratio))
 
     subj_data, xyz_mm = [], []
     for sub in subjects:
-        sd = load_subject(file_root, sub, require_xyz=need_xyz)
+        sd = load_subject(
+            file_root, sub, require_xyz=need_xyz,
+            raw_root=args.raw_root,
+        )
         subj_data.append(sd)
         xyz_mm.append(sd.ecog_xyz_mm)
 
