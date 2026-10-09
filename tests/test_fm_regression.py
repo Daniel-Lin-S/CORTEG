@@ -603,8 +603,8 @@ class TestNativeWindows(unittest.TestCase):
 
     def test_split_rule(self):
         from data.stanford_native import split_boundary
-        self.assertEqual(split_boundary(610_040), (400_000, "first400s"))
-        self.assertEqual(split_boundary(178_960), (119_306, "first2/3"))
+        self.assertEqual(split_boundary(610_040), (400_000, "at_or_above_cutoff"))
+        self.assertEqual(split_boundary(178_960), (119_306, "below_cutoff"))
 
     def test_roots_follow_the_data_root(self):
         """--native_root > $CORTEG_NATIVE1K_ROOT > <data_root>/native_1k/built, with the

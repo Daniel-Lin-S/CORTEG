@@ -1,0 +1,30 @@
+{
+  "defaults": {
+    "preprocessing_version": "stanford_train_variance_v1",
+    "ecog_scale": 0.0298,
+    "split": {
+      "duration_cutoff_seconds": 600,
+      "at_or_above_cutoff": {
+        "train_seconds": 400
+      },
+      "below_cutoff": {
+        "train_parts": 2,
+        "total_parts": 3
+      }
+    },
+    "notch_bands_hz": [[59.5, 60.5], [119.5, 120.5], [179.5, 180.5]],
+    "notch_filter_order": 3,
+    "notch_filter_family": "but",
+    "notch_filter_direction": "onepass",
+    "bad_channel": {
+      "variance_normalization": 0,
+      "low_variance_multiplier": 0.2,
+      "high_variance_multiplier": 5.0
+    },
+    "reference": {
+      "channels": "all",
+      "method": "avg"
+    }
+  },
+  "overrides": {}
+}

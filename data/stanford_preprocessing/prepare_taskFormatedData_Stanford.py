@@ -1,13 +1,19 @@
 """
 DESCRIPTION:
-    Prepare the ECoG and trajectory data in a task format, i.e., pair prior 1-s ECoG epoch with the next trjectory point.
-    Ideally this procedure should be done within each fold, but we opt for first extracting features
-    for the whole dataset and then do chronological cross-validation. This way, we avoided repeated feature extraction,
-    which will drastically increase time.
+    Prepare ECoG windows paired with finger-flexion targets.
+    Input: cleaned subject MATLAB files and resolved split config.
+    Output: one feature pickle per subject with six train/test arrays.
 
 """
 
 from scipy.io import loadmat
+from pathlib import Path
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+from data.stanford_split import load_split_config, split_boundary
 import pickle
 import numpy as np
 import mne
@@ -22,11 +28,13 @@ datasets = {
         "fs_ecog": 1000,
         "fs_dg": 25,
         # file path to the preprocessed data from MATLAB
-        "path": './preprocessed_data/Stanford/'
+        "path": str(REPO_ROOT / 'preprocessed_data' / 'Stanford')
     },
 }
 
-def HGALFS_feature_extractor(data, traj, fs, window_size=1000, step_size = 50, T = 200, delay = None):
+def HGALFS_feature_extractor(
+    data, traj, fs, window_size=1000, step_size=50, T=200, delay=None
+):
     """
     INPUT:
         data: [time, channel] ECoG data, 1 kHz
@@ -41,7 +49,9 @@ def HGALFS_feature_extractor(data, traj, fs, window_size=1000, step_size = 50, T
         Y: [nEpoch, 5]
         X0: [nEpoch, nChannel, window_size/fs * 128 Hz]
     """
-    assert data.shape[0] == traj.shape[0], "ECoG and Trajectory must be same shape"
+    assert data.shape[0] == traj.shape[0], (
+        "ECoG and trajectory must have the same sample count."
+    )
     data = data.astype(np.float64)
     traj = traj.astype(np.float64)
 
@@ -91,46 +101,56 @@ def HGALFS_feature_extractor(data, traj, fs, window_size=1000, step_size = 50, T
 
     return np.array(X), np.array(Y), np.array(X0)
 
-def main():
-    # select one dataset for analysis
+def main() -> None:
+    """Extract paired windows from each prepared Stanford recording.
+
+    Input
+    -----
+    ``preprocessed_data/Stanford/<subject>.mat`` and ``resolved_config.json``.
+
+    Output
+    ------
+    ``<subject>_features.pkl`` in the same folder, containing six arrays:
+    train ECoG and flexion, test ECoG and flexion, and train/test 128 Hz ECoG.
+    """
     selected = 'Stanford'
-    fileLoc = datasets[selected]['path']
+    file_root = Path(datasets[selected]['path'])
     fs_ecog = datasets[selected]['fs_ecog']
     fs_dg = datasets[selected]['fs_dg']
+    split = load_split_config(file_root)
 
-    for iS in range(datasets[selected]['subjects']):  # datasets[selected]['subjects']
-        fileName = fileLoc + datasets[selected]['subject_name'][iS] + '.mat'
-        data1 = loadmat(fileName)  # data [channel, time], flex [time, 5]
-
-        # get data
-        ECoG_1k = data1['data'].T
-        trajectory_1k = data1['flex']
-
-        # split train and test dataset
-        if ECoG_1k.shape[0] // fs_ecog >= 600:
-            ECoG_1k_train, trajectory_1k_train = ECoG_1k[0:400 * fs_ecog, :], trajectory_1k[0:400 * fs_ecog, :]
-            ECoG_1k_test, trajectory_1k_test = ECoG_1k[400 * fs_ecog:, :], trajectory_1k[400 * fs_ecog:, :]
-        else:
-            len = ECoG_1k.shape[0] // 3 * 2
-            ECoG_1k_train, trajectory_1k_train = ECoG_1k[0:len, :], trajectory_1k[0:len, :]
-            ECoG_1k_test, trajectory_1k_test = ECoG_1k[len:, :], trajectory_1k[len:, :]
-
-        ECoG_train, trajectory_train, ECoG_train_128 = HGALFS_feature_extractor(ECoG_1k_train, trajectory_1k_train,
-                                                                                fs_ecog,
-                                                                                window_size=1 * fs_ecog,
-                                                                                step_size=fs_ecog // fs_dg, T=200,
-                                                                                delay=40)
-        ECoG_test, trajectory_test, ECoG_test_128 = HGALFS_feature_extractor(ECoG_1k_test, trajectory_1k_test, fs_ecog,
-                                                                             window_size=1 * fs_ecog,
-                                                                             step_size=fs_ecog // fs_dg, T=200,
-                                                                             delay=40)
-
-        filename = fileLoc + f"{datasets[selected]['subject_name'][iS]}_features.pkl"
-
-        with open(filename, "wb") as f:
-            pickle.dump([ECoG_train, trajectory_train, ECoG_test, trajectory_test, ECoG_train_128, ECoG_test_128], f)
-
-        print(f"Finished subject: {iS}\n", flush=True)
+    for subject in datasets[selected]['subject_name']:
+        input_path = file_root / f'{subject}.mat'
+        recording = loadmat(input_path)
+        ecog = recording['data'].T
+        trajectory = recording['flex']
+        if ecog.shape[0] != trajectory.shape[0]:
+            raise ValueError(
+                f'{input_path}: ECoG and flexion sample counts differ.'
+            )
+        boundary, _ = split_boundary(ecog.shape[0], fs_ecog, split)
+        ecog_train = ecog[:boundary, :]
+        ecog_test = ecog[boundary:, :]
+        trajectory_train = trajectory[:boundary, :]
+        trajectory_test = trajectory[boundary:, :]
+        train = HGALFS_feature_extractor(
+            ecog_train, trajectory_train, fs_ecog,
+            window_size=fs_ecog, step_size=fs_ecog // fs_dg,
+            T=200, delay=40,
+        )
+        test = HGALFS_feature_extractor(
+            ecog_test, trajectory_test, fs_ecog,
+            window_size=fs_ecog, step_size=fs_ecog // fs_dg,
+            T=200, delay=40,
+        )
+        output_path = file_root / f'{subject}_features.pkl'
+        with output_path.open('wb') as stream:
+            pickle.dump(
+                [train[0], train[1], test[0], test[1],
+                 train[2], test[2]],
+                stream,
+            )
+        print(f'Finished subject: {subject}; saved {output_path}', flush=True)
 
 if __name__ == "__main__":
     main()

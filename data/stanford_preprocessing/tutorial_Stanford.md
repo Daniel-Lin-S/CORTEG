@@ -5,7 +5,7 @@ This document provides a detailed tutorial for preprocessing the Stanford Finger
 ## 1. Dataset Acquisition
 The Stanford FingerFlex dataset consists of ECoG recordings from 9 subjects while they performed finger flexion tasks.
 * **Download Link:** [Stanford-FingerFlex: zk881ps0522](https://searchworks.stanford.edu/view/zk881ps0522)
-* **Storage:** Download the raw subject folders and place them under a directory of your choice (e.g. `$CORTEG_DATA_ROOT/raw/Stanford/`). Update the `dataLoc` variable at the top of `data_preprocessing_Stanford.m` to point to that path.
+* **Storage:** Keep the raw subject folders in a directory of your choice and set `CORTEG_STANFORD_RAW_ROOT` to that directory, for example `/data/lyh/neural_data/ecog/fingerflex/data`. The preprocessing script reads that directory without modifying it.
 
 ## 2. Environment Setup
 The pipeline requires two distinct environments:
@@ -26,9 +26,9 @@ Run the script `data_preprocessing_Stanford.m` to clean the raw ECoG signals.
 ### Key Operations:
 * **Scaling:** Data is scaled by a factor of 0.0298 to adjust units. 
 * **Line Noise Removal:** Bandstop filters are applied at 60Hz, 120Hz, and 180Hz (bandwidth of 1Hz each) using a Butterworth filter.
-* **Interactive Bad Channel Selection:** The script uses `ft_databrowser` to visualize the data. You must manually identify faulty channels (e.g., 'ch40' for subject 'mv') and enter them in the prompt.
+* **Automatic Bad Channel Selection:** After notch filtering, the script computes variance per channel on the chronological training portion only. Channels with variance above `varianceHighMultiplier × median variance` or below `varianceLowMultiplier × median variance` are removed. The defaults are `5` and `0.2`; change them in `configs/stanford_preprocessing.json` using the `overrides.bad_channel` object. The resolved JSON is saved as `preprocessed_data/Stanford/resolved_config.json`. The median uses all channels. The removed labels and thresholds are saved inside the cleaned `.mat` file.
 * **Common Average Referencing (CAR):** All remaining channels are re-referenced to the global average to reduce common noise.
-* **Output:** Preprocessed `.mat` files are saved to `./preprocessed_data/Stanford/`.
+* **Input and output:** Set `CORTEG_STANFORD_RAW_ROOT` to the raw downloaded `data/` directory containing `<subject>/<subject>_fingerflex.mat`. The raw files are read only. Cleaned `.mat` files are saved under the repository’s `preprocessed_data/Stanford/` directory. The script reuses existing cleaned files only when their saved provenance matches the resolved configuration. No separate electrode-location file is created: the cleaned `channelName` selects coordinates from raw `locs` when needed.
 
 ---
 
@@ -48,8 +48,8 @@ For each epoch, the following features are extracted from 1-second ECoG windows:
 
 ### Dataset Splitting:
 The script splits the data chronologically:
-* **Long recordings (>= 600s):** First 400s for training, the rest for testing.
-* **Short recordings:** 2/3 for training, 1/3 for testing.
+* At or above `split.duration_cutoff_seconds` (600): `split.at_or_above_cutoff.train_seconds` (400) is the training duration.
+* Below the cutoff: `split.below_cutoff.train_parts` (2) of `split.below_cutoff.total_parts` (3) equal whole-sample parts are training.
 
 ---
 
