@@ -57,11 +57,23 @@ analyses*, Nat. Hum. Behav. 2019,
 
 ```
 bp_features.pkl      # X_feat_tr (N,C,200,2)  X_feat_te  X_raw_tr (N,C,128)  X_raw_te  y_tr (N,5)  y_te (N,5)
-bp_electrode_loc.mat # (C, 3) electrode coordinates in mm
-...                  # one pair per subject
+bp.mat                # cleaned data and channelName from MATLAB
+...                   # one prepared pair per subject
 ```
 
-The pipeline that produces these files — MATLAB cleaning plus Python feature extraction, band-pass 70–200 Hz with Hilbert envelope for the high-gamma stream and 1–64 Hz for the low-frequency stream — is documented step by step in
+Electrode coordinates are selected at runtime from raw `locs` using the
+cleaned `channelName` order. Set `--raw_root` or
+`$CORTEG_STANFORD_RAW_ROOT` to the downloaded `data/` folder containing
+`<sub>/<sub>_fingerflex.mat`. No separate location file is produced.
+Legacy `_electrode_loc.mat` files remain readable when no raw root is
+specified. The raw recording folder is read only.
+
+Current MATLAB cleaning uses training-only channel variance with
+configurable lower/upper median multipliers of 0.2 and 5, and saves the
+removed channel names in the cleaned `.mat`. This differs from the older
+interactive bad-channel choices, whose complete list is unavailable.
+
+The pipeline that produces these files — MATLAB cleaning plus Python feature extraction, band-pass 70–200 Hz with Hilbert envelope for the high-gamma stream and resampled cleaned ECoG for the low-frequency stream — is documented step by step in
 [`data/stanford_preprocessing/tutorial_Stanford.md`](data/stanford_preprocessing/tutorial_Stanford.md).
 
 **Native 1 kHz windows (iEEG-FM comparison only).** BrainBERT, PopT and Brant are

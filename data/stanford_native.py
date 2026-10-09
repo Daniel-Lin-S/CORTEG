@@ -21,8 +21,8 @@ already asks for, plus the CORTEG pickle)::
     python -m data.stanford_native                      # all nine subjects
     python -m data.stanford_native --subjects bp,mv     # or: --subjects bp mv
 
-  --data_root  folder of <sub>_features.pkl / <sub>_electrode_loc.mat, the
-               same --data_root the runners take; default paths.get_data_root()
+  --data_root  folder of <sub>_features.pkl and cleaned <sub>.mat with
+               channelName; default paths.get_data_root()
                ($CORTEG_DATA_ROOT). The two defaults below are relative to it,
                so a build with --data_root D is found by a run with
                --data_root D. (--pkl_root is an alias.)
@@ -38,9 +38,8 @@ already asks for, plus the CORTEG pickle)::
 How the alignment is established, per subject:
 
   1. Channels. CORTEG dropped bad channels, so the pickle has C <= Cn of the
-     raw file's channels. Each CORTEG electrode is matched to the raw file's
-     ``locs`` by nearest neighbour (distances are ~1e-6 mm for every subject),
-     which recovers the kept channels in CORTEG's order.
+     raw file's channels. Cleaned ``channelName`` selects raw ``locs``
+     in CORTEG order; nearest-neighbour matching verifies the indices.
   2. Split. The paper's rule: recordings longer than 600 s train on the first
      400 s, otherwise on the first two thirds. Windows are 1 s (1000 samples)
      with a 40-sample stride, the target read at the window's right edge.
@@ -75,6 +74,7 @@ import gc
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -85,6 +85,9 @@ if _REPO not in sys.path:
     sys.path.insert(0, _REPO)
 
 from paths import get_data_root  # noqa: E402
+from data.stanford_split import (  # noqa: E402
+    load_split_config, split_boundary as configured_split_boundary,
+)
 
 SUBJECTS = ["bp", "cc", "ht", "jc", "jp", "mv", "wc", "wm", "zt"]
 FS = 1000                     # native sampling rate (Hz)
@@ -297,11 +300,25 @@ def per_channel_corr(A: np.ndarray, B: np.ndarray) -> np.ndarray:
     return num / den
 
 
-def split_boundary(total_samples: int) -> Tuple[int, str]:
-    """(boundary, rule): train is [0, boundary), test is [boundary, T)."""
-    if total_samples > 600 * FS:
-        return 400 * FS, "first400s"
-    return (total_samples * 2) // 3, "first2/3"
+def split_boundary(
+    total_samples: int, split: Optional[dict] = None
+) -> Tuple[int, str]:
+    """Return the exclusive train endpoint and selected duration rule.
+
+    Parameters
+    ----------
+    total_samples : int
+        Length of the 1 kHz recording.
+    split : dict, optional
+        Resolved split settings. Repository settings are used by default.
+
+    Returns
+    -------
+    tuple[int, str]
+        Training boundary in samples and the duration rule used.
+    """
+    resolved = load_split_config() if split is None else split
+    return configured_split_boundary(total_samples, FS, resolved)
 
 
 def median_corr_for_offset(xf, offset: int, probe_n, X_raw, T: int) -> float:
@@ -356,7 +373,9 @@ def process_subject(sub: str, raw_dir: str, pkl_root: str, out_root: str,
     locs = np.asarray(mat["locs"], dtype=np.float64)      # (Cn, 3)
     T, Cn = data.shape
 
-    sd = load_subject(pkl_root, sub, require_xyz=True)
+    sd = load_subject(
+        pkl_root, sub, require_xyz=True, raw_root=raw_dir
+    )
     X_tr, X_te = sd.X_raw_tr, sd.X_raw_te                 # (N, C, 128)
     N_tr, N_te, C = X_tr.shape[0], X_te.shape[0], X_tr.shape[1]
     xyz = sd.ecog_xyz_mm.astype(np.float64)
@@ -369,7 +388,9 @@ def process_subject(sub: str, raw_dir: str, pkl_root: str, out_root: str,
     raw_kept = data[:, kept_idx]
 
     # (2) split, (3) offsets tuned against the 128 Hz stream
-    boundary, rule = split_boundary(T)
+    boundary, rule = split_boundary(
+        T, load_split_config(Path(pkl_root))
+    )
     xf = derive_lfs_continuous(raw_kept)
     # The first window needs a full lookback (right edge >= WIN - 1); the phase
     # the original pipeline used sits 40 samples later, at WIN + 39.
@@ -487,6 +508,13 @@ def main(argv=None) -> int:
     raw_dir = raw_root(args.raw_root, args.data_root)
     pkl_root = get_data_root(args.data_root)
     out_root = native_root(args.out_root, args.data_root)
+    raw_path = Path(raw_dir).resolve()
+    output_path = Path(out_root).resolve()
+    if output_path == raw_path or raw_path in output_path.parents:
+        raise ValueError(
+            f"Native output {output_path} is inside raw root "
+            f"{raw_path}; choose an output outside the raw data."
+        )
     rows = [process_subject(s, raw_dir, pkl_root, out_root) for s in subjects]
     path = _merge_summary(out_root, rows)
     print(f"\nsummary: {path}")
