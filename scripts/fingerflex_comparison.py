@@ -51,7 +51,7 @@ def ensure_comparison(
         Path(base["artifact_base"]) / "comparisons"
         / f"{study['name']}__{identifier}"
     )
-    for directory in ("provenance", "reports", "status"):
+    for directory in ("provenance", "reports"):
         (root / directory).mkdir(parents=True, exist_ok=True)
     index = {
         "name": study["name"],

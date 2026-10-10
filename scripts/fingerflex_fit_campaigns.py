@@ -448,8 +448,7 @@ def _worker(
         jobs.task_done()
 
 
-def coordinate(study: dict, roots: dict[str, Path],
-               comparison: Path) -> None:
+def coordinate(study: dict, roots: dict[str, Path]) -> None:
     """Dispatch PLS on CPU and CNN-GRU across four capable GPUs."""
     query = subprocess.check_output([
         "nvidia-smi",
@@ -457,11 +456,10 @@ def coordinate(study: dict, roots: dict[str, Path],
         "--format=csv,noheader,nounits",
     ], text=True)
     gpus = rank_gpus(query)
-    status = comparison / "status"
-    (status / "gpu_assignment.json").write_text(
+    cnn_status = roots["cnn_gru"] / "status"
+    (cnn_status / "gpu_assignment.json").write_text(
         json.dumps({"physical_gpu_indices": gpus}, indent=2) + "\n"
     )
-    events = status / "jobs.jsonl"
     lock = threading.Lock()
     cnn_queue: queue.Queue = queue.Queue()
     pls_queue: queue.Queue = queue.Queue()
@@ -469,14 +467,15 @@ def coordinate(study: dict, roots: dict[str, Path],
         threading.Thread(
             target=_worker,
             args=("cnn_gru", roots["cnn_gru"], cnn_queue,
-                  events, lock, gpu),
+                  cnn_status / "jobs.jsonl", lock, gpu),
             daemon=True,
         ) for gpu in gpus
     ]
     threads.append(threading.Thread(
         target=_worker,
         args=("pls", roots["pls"], pls_queue,
-              events, lock, None),
+              roots["pls"] / "status" / "jobs.jsonl",
+              lock, None),
         daemon=True,
     ))
     for thread in threads:
@@ -547,12 +546,12 @@ def main() -> None:
         if pending == 0:
             print("All new fits are complete.", flush=True)
             return
-        session = f"fingerflex_models_{comparison.name[-12:]}"
+        session = f"fingerflex_fits_{roots['cnn_gru'].name[-12:]}"
         command = shlex.join([
             sys.executable, str(Path(__file__).resolve()),
             "coordinate", "--config", str(args.config.resolve()),
         ])
-        log = comparison / "status" / "coordinator.log"
+        log = roots["cnn_gru"] / "status" / "coordinator.log"
         shell_command = (
             f"cd {shlex.quote(str(REPO))} && {command} "
             f"> {shlex.quote(str(log))} 2>&1"
@@ -564,11 +563,12 @@ def main() -> None:
         print(f"tmux session: {session}; pending fits: {pending}", flush=True)
         return
     try:
-        coordinate(study, roots, comparison)
+        coordinate(study, roots)
         from scripts.fingerflex_comparison import report
         report(comparison)
     except Exception:
-        (comparison / "status" / "coordinator_error.log").write_text(
+        (roots["cnn_gru"] / "status"
+         / "coordinator_error.log").write_text(
             traceback.format_exc()
         )
         raise
