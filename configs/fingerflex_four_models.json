@@ -8,6 +8,11 @@
   "pls": {
     "max_components": 50
   },
+  "runtime": {
+    "pls_workers": 4,
+    "pls_memory_gib": 16,
+    "pls_nice": 10
+  },
   "cnn_gru": {
     "epochs": 200,
     "patience": 30,

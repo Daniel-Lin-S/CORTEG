@@ -6,6 +6,8 @@ Output is assertions and temporary reports and plots; no raw data or GPU.
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,12 +19,43 @@ from data.fingerflex_cache import cache_root
 from data.fingerflex_wavelet import _write_features, feature_root
 from experiments.fingerflex_pls import fit_pls
 from models.temporal_spatial_cnn_gru import TemporalSpatialCNNGRU
-from scripts.fingerflex_fit_campaigns import fit_semantics
+from scripts.fingerflex_fit_campaigns import (
+    fit_semantics,
+    pls_cpu_command,
+)
 from scripts.fingerflex_comparison import ensure_comparison, report
 
 
 class FingerflexExtensionTests(unittest.TestCase):
     """Protect the deterministic baseline and report contracts."""
+
+    def test_pls_cpu_limits_apply_to_child(self) -> None:
+        """PLS limits and priorities are inherited by the fit process."""
+        runtime = {
+            "pls_workers": 4,
+            "pls_memory_gib": 16,
+            "pls_nice": 10,
+        }
+        probe = (
+            "import json,os,resource,subprocess;"
+            "print(json.dumps({'nice':os.getpriority(os.PRIO_PROCESS,0),"
+            "'address_space':resource.getrlimit(resource.RLIMIT_AS)[0],"
+            "'io':subprocess.check_output(['ionice','-p',"
+            "str(os.getpid())],text=True).strip()}))"
+        )
+        command = pls_cpu_command(
+            [sys.executable, "-c", probe], runtime,
+        )
+        result = subprocess.run(
+            command, check=True, capture_output=True, text=True,
+        )
+        actual = json.loads(result.stdout)
+        self.assertEqual(actual["nice"], runtime["pls_nice"])
+        self.assertEqual(
+            actual["address_space"],
+            runtime["pls_memory_gib"] * (1 << 30),
+        )
+        self.assertEqual(actual["io"], "idle")
 
     def test_model_is_dataset_agnostic(self) -> None:
         """Architecture accepts arbitrary channel, duration, output counts."""
@@ -128,6 +161,10 @@ class FingerflexExtensionTests(unittest.TestCase):
                 "cnn_gru": {"epochs": 2},
             }
             identity = fit_semantics("pls", study, base, legacy)
+            study["runtime"] = {"pls_workers": 4}
+            self.assertEqual(
+                identity, fit_semantics("pls", study, base, legacy),
+            )
             study["subjects"].append("jp")
             study["seeds"].append(1)
             self.assertEqual(

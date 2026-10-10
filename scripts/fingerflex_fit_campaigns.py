@@ -14,6 +14,7 @@ import json
 import os
 import queue
 import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -59,6 +60,10 @@ CNN_TRAINING_KEYS = (
     "epochs", "patience", "batch_size", "base_lr",
     "weight_decay", "warmup_epochs", "min_lr",
 )
+RUNTIME_KEYS = ("pls_workers", "pls_memory_gib", "pls_nice")
+GIB_BYTES = 1 << 30
+MAX_NICE = 19
+IONICE_CLASS_IDLE = 3
 
 
 def _digest(value: dict) -> str:
@@ -85,7 +90,50 @@ def load_study(path: Path) -> tuple[dict, dict]:
         raise ValueError("CNN-GRU training keys are incomplete or unexpected.")
     if source["pls"]["max_components"] < 1:
         raise ValueError("PLS maximum components must be positive.")
+    runtime = source.get("runtime")
+    if not isinstance(runtime, dict) or set(runtime) != set(RUNTIME_KEYS):
+        raise ValueError(
+            f"Runtime settings must contain {RUNTIME_KEYS}."
+        )
+    for key in ("pls_workers", "pls_memory_gib"):
+        value = runtime[key]
+        if type(value) is not int or value < 1:
+            raise ValueError(f"Runtime {key} must be a positive integer.")
+    if type(runtime["pls_nice"]) is not int or not (
+        0 <= runtime["pls_nice"] <= MAX_NICE
+    ):
+        raise ValueError(
+            f"Runtime pls_nice must be between 0 and {MAX_NICE}."
+        )
+    for executable in ("ionice", "nice", "prlimit"):
+        if shutil.which(executable) is None:
+            raise FileNotFoundError(
+                f"PLS CPU resource tool is unavailable: {executable}."
+            )
     return source, base
+
+
+def pls_cpu_command(command: list[str], runtime: dict) -> list[str]:
+    """Limit one PLS process and lower its CPU and I/O priority.
+
+    Parameters
+    ----------
+    command : list[str]
+        Python fit command and its arguments.
+    runtime : dict
+        CPU scheduling and per-process address-space settings.
+
+    Returns
+    -------
+    list[str]
+        Command with inherited resource limits and priorities.
+    """
+    memory_bytes = runtime["pls_memory_gib"] * GIB_BYTES
+    return [
+        "ionice", "-c", str(IONICE_CLASS_IDLE),
+        "nice", "-n", str(runtime["pls_nice"]),
+        "prlimit", f"--as={memory_bytes}", "--", *command,
+    ]
 
 
 def find_legacy(base: dict, study: dict) -> Path:
@@ -394,6 +442,7 @@ def _worker(
     events: Path,
     lock: threading.Lock,
     gpu: int | None,
+    runtime: dict,
 ) -> None:
     """Run independent fits, logging errors without stopping other jobs."""
     while True:
@@ -421,6 +470,7 @@ def _worker(
         if gpu is not None:
             env["CUDA_VISIBLE_DEVICES"] = str(gpu)
         else:
+            command = pls_cpu_command(command, runtime)
             env.update({
                 "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1",
                 "MKL_NUM_THREADS": "1",
@@ -467,32 +517,39 @@ def coordinate(study: dict, roots: dict[str, Path]) -> None:
         threading.Thread(
             target=_worker,
             args=("cnn_gru", roots["cnn_gru"], cnn_queue,
-                  cnn_status / "jobs.jsonl", lock, gpu),
+                  cnn_status / "jobs.jsonl", lock, gpu,
+                  study["runtime"]),
             daemon=True,
         ) for gpu in gpus
     ]
-    threads.append(threading.Thread(
-        target=_worker,
-        args=("pls", roots["pls"], pls_queue,
-              roots["pls"] / "status" / "jobs.jsonl",
-              lock, None),
-        daemon=True,
-    ))
+    threads.extend(
+        threading.Thread(
+            target=_worker,
+            args=("pls", roots["pls"], pls_queue,
+                  roots["pls"] / "status" / "jobs.jsonl",
+                  lock, None, study["runtime"]),
+            daemon=True,
+        ) for _ in range(study["runtime"]["pls_workers"])
+    )
+    (roots["pls"] / "status" / "runtime.json").write_text(
+        json.dumps(study["runtime"], indent=2) + "\n"
+    )
     for thread in threads:
         thread.start()
     for subject, fraction, seed in itertools.product(
         study["subjects"], study["fractions"], study["seeds"],
     ):
         cnn_queue.put((subject, fraction, seed))
-    for subject, fraction in itertools.product(
-        study["subjects"], study["fractions"],
+    for fraction, subject in itertools.product(
+        study["fractions"], study["subjects"],
     ):
         pls_queue.put((subject, fraction, None))
     cnn_queue.join()
     pls_queue.join()
     for _ in gpus:
         cnn_queue.put(None)
-    pls_queue.put(None)
+    for _ in range(study["runtime"]["pls_workers"]):
+        pls_queue.put(None)
     for thread in threads:
         thread.join()
 
