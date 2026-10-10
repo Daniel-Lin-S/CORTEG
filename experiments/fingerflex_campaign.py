@@ -21,6 +21,9 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from data.fingerflex_campaign import digest_array
 from experiments.common import set_seed
+from experiments.regression_trainer import (
+    predict, train_regressor,
+)
 from experiments.run_regression_hilo_clean import (
     build_model,
     unfreeze_merge_params,
@@ -245,57 +248,79 @@ def _load_arrays(
     delay: int,
     fraction: float,
     output: Path,
+    include_test: bool = True,
 ) -> tuple[dict, dict]:
-    """Load common rows and normalize features using selected fit rows."""
+    """Load fit rows and optionally test rows with fit-only normalization."""
     common = root / subject / "common"
     feature_root = root / subject / model / str(delay)
     train_y = np.load(common / "train_y.npy")
-    test_y = np.load(common / "test_y.npy")
     fit, val = split_fit_rows(len(train_y), fraction)
     y_mean = train_y[fit].mean(axis=0, keepdims=True)
     y_std = train_y[fit].std(axis=0, keepdims=True)
     if (y_std <= 0).any():
         raise ValueError("Selected fit targets contain a constant finger.")
-    y_arrays = tuple(((x - y_mean) / y_std).astype(np.float32)
-                     for x in (train_y[fit], train_y[val], test_y))
+    y_sources = [train_y[fit], train_y[val]]
+    if include_test:
+        test_y = np.load(common / "test_y.npy")
+        y_sources.append(test_y)
+    y_arrays = tuple(
+        ((values - y_mean) / y_std).astype(np.float32)
+        for values in y_sources
+    )
     if model == "cnn_gru":
         feature_root = root / subject / "corteg" / str(delay)
-        train_x = np.load(feature_root / "train_hi.npy", mmap_mode="r")[..., 0]
-        test_x = np.load(feature_root / "test_hi.npy", mmap_mode="r")[..., 0]
+        train_x = np.load(feature_root / "train_hi.npy", mmap_mode="r"
+                          )[..., 0]
+        test_file = "test_hi.npy"
     else:
         train_x = np.load(feature_root / "train_x.npy", mmap_mode="r")
-        test_x = np.load(feature_root / "test_x.npy", mmap_mode="r")
-    x_arrays, x_mean, x_std = normalize(
+        test_file = "test_x.npy"
+    if include_test:
+        test_x = np.load(feature_root / test_file, mmap_mode="r")
+        if model == "cnn_gru":
+            test_x = test_x[..., 0]
+    else:
+        test_x = train_x[val]
+    normalized, x_mean, x_std = normalize(
         train_x[fit], train_x[val], test_x, model,
     )
+    x_arrays = normalized if include_test else normalized[:2]
     arrays = {"x": x_arrays, "y": y_arrays}
-    stats = {"x_mean": x_mean, "x_std": x_std,
-             "y_mean": y_mean, "y_std": y_std}
+    stats = {
+        "x_mean": x_mean, "x_std": x_std,
+        "y_mean": y_mean, "y_std": y_std,
+    }
     if model == "corteg":
         train_hi = np.load(feature_root / "train_hi.npy", mmap_mode="r")
-        test_hi = np.load(feature_root / "test_hi.npy", mmap_mode="r")
-        hi_arrays, hi_mean, hi_std = normalize(
-            train_hi[fit, ..., 0], train_hi[val, ..., 0],
-            test_hi[..., 0], model,
+        high_test = (
+            np.load(feature_root / "test_hi.npy", mmap_mode="r")[..., 0]
+            if include_test else train_hi[val, ..., 0]
         )
-        arrays["hi"] = hi_arrays
+        high, hi_mean, hi_std = normalize(
+            train_hi[fit, ..., 0], train_hi[val, ..., 0],
+            high_test, model,
+        )
+        arrays["hi"] = high if include_test else high[:2]
         stats.update({"hi_mean": hi_mean, "hi_std": hi_std})
     np.savez(output / "normalization.npz", **stats)
     indices = np.load(common / "train_indices.npy")
-    test_indices = np.load(common / "test_indices.npy")
     metadata = {
         "fit_indices_sha256": digest_array(indices[fit]),
         "validation_indices_sha256": digest_array(indices[val]),
-        "test_grid_sha256": digest_array(test_indices),
         "fit_window_count": len(indices[fit]),
         "validation_window_count": len(indices[val]),
-        "test_window_count": len(test_indices),
         "fit_first_target": int(indices[fit][0]),
         "fit_last_target": int(indices[fit][-1]),
         "validation_first_target": int(indices[val][0]),
-        "test_first_target": int(test_indices[0]),
-        "target_values_sha256": digest_array(test_y),
     }
+    if include_test:
+        test_indices = np.load(common / "test_indices.npy")
+        metadata.update({
+            "test_grid_sha256": digest_array(test_indices),
+            "test_window_count": len(test_indices),
+            "test_first_target": int(test_indices[0]),
+            "target_values_sha256": digest_array(test_y),
+        })
     return arrays, metadata
 
 
@@ -307,7 +332,7 @@ def _loaders(
 ) -> tuple[DataLoader, DataLoader, DataLoader]:
     """Create deterministic fit, validation, and test data loaders."""
     loaders = []
-    for index in range(3):
+    for index in range(len(arrays["x"])):
         tensors = [torch.from_numpy(arrays["x"][index])]
         if model_name == "corteg":
             tensors.append(torch.from_numpy(arrays["hi"][index]))
@@ -350,24 +375,6 @@ def _predict(
     return np.concatenate(target), np.concatenate(predicted)
 
 
-def _group_norms(
-    model: nn.Module,
-    names: dict,
-    initial: dict[str, torch.Tensor],
-) -> dict:
-    """Return L2 parameter norms and changes since initialization."""
-    parameters = dict(model.named_parameters())
-    result = {}
-    for group, labels in names.items():
-        norm = sum(float(parameters[key].detach().float().square().sum())
-                   for key in labels) ** 0.5
-        change = sum(float((parameters[key].detach().cpu()
-                            - initial[key]).float().square().sum())
-                     for key in labels) ** 0.5
-        result[group] = {"norm": norm, "change": change}
-    return result
-
-
 def fit_job(
     root: Path,
     config: dict,
@@ -376,8 +383,10 @@ def fit_job(
     fraction: float,
     seed: int,
     delay: int,
+    architecture: dict | None = None,
+    validation_only: bool = False,
 ) -> None:
-    """Run one CUDA fit and save validation-selected test result."""
+    """Train one fit and optionally defer test scoring until selection."""
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for the fingerflex campaign.")
     set_seed(seed)
@@ -389,10 +398,12 @@ def fit_job(
         root / "runs" / fraction_name / model_name / subject / f"seed{seed}"
     )
     output.mkdir(parents=True, exist_ok=True)
-    if (output / "result.json").exists():
+    marker = "validation_result.json" if validation_only else "result.json"
+    if (output / marker).exists():
         return
     arrays, boundaries = _load_arrays(
         root / "prepared", subject, model_name, delay, fraction, output,
+        include_test=not validation_only,
     )
     common = root / "prepared" / subject / "common"
     xyz_np = np.load(common / "xyz_mm.npy")
@@ -409,6 +420,7 @@ def fit_job(
             input_channels=arrays["x"][0].shape[1],
             input_length=arrays["x"][0].shape[2],
             outputs=FINGER_COUNT,
+            **(architecture or {}),
         ) if model_name == "cnn_gru" else _hilo_model(
             arrays["x"][0].shape[1], Path(config["hilo_source"])
         )
@@ -435,105 +447,36 @@ def fit_job(
             min_lr=training["min_lr"],
         )
     )
-    train, validation, test = _loaders(
+    loaders = _loaders(
         arrays, model_name, training["batch_size"], seed,
     )
-    best_score = -np.inf
-    best_epoch = -1
-    bad_epochs = 0
-    history = output / "history.jsonl"
-    with history.open("w") as stream:
-        for epoch in range(training["epochs"]):
-            model.train()
-            loss_total = 0.0
-            seen = 0
-            grad_norms = []
-            group_grad_norms = {key: [] for key in names}
-            for batch in train:
-                x = batch[0].to(device)
-                if model_name == "corteg":
-                    high = batch[1].to(device)
-                    truth = batch[2].to(device)
-                    prediction = model(
-                        x, x_hi=high,
-                        ecog_xyz=xyz.expand(len(x), -1, -1),
-                    )
-                else:
-                    truth = batch[1].to(device)
-                    prediction = model(x)
-                loss = torch.mean((prediction - truth) ** 2)
-                if not torch.isfinite(loss):
-                    raise ValueError("Nonfinite training loss.")
-                optimizer.zero_grad(set_to_none=True)
-                loss.backward()
-                grad = torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), max_norm=1.0,
-                )
-                if not torch.isfinite(grad):
-                    raise ValueError("Nonfinite gradient norm.")
-                grad_norms.append(float(grad))
-                parameters = dict(model.named_parameters())
-                for key, labels in names.items():
-                    value = sum(
-                        float(parameters[label].grad.detach().float()
-                              .square().sum())
-                        for label in labels
-                        if parameters[label].grad is not None
-                    ) ** 0.5
-                    group_grad_norms[key].append(value)
-                optimizer.step()
-                loss_total += float(loss.detach()) * len(x)
-                seen += len(x)
-            val_true, val_pred = _predict(
-                model, validation, model_name, xyz, device,
+    train, validation = loaders[:2]
+    def forward(
+        network: nn.Module, batch: tuple,
+        target_device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply this dataset's high-gamma and spatial inputs."""
+        x = batch[0].to(target_device)
+        if model_name == "corteg":
+            high = batch[1].to(target_device)
+            truth = batch[2].to(target_device)
+            prediction = network(
+                x, x_hi=high,
+                ecog_xyz=xyz.expand(len(x), -1, -1),
             )
-            metrics = metric_values(val_true, val_pred)
-            val_r = metrics["overall"]["pearson_r"]
-            val_mse = metrics["overall"]["mse"]
-            if model_name == "hilo":
-                scheduler.step(val_mse)
-            else:
-                scheduler.step()
-            record = {
-                "epoch": epoch + 1,
-                "train_mse": loss_total / seen,
-                "validation": metrics,
-                "learning_rates": {
-                    group["group_name"]: group["lr"]
-                    for group in optimizer.param_groups
-                },
-                "gradient_norm_mean": float(np.mean(grad_norms)),
-                "group_gradient_norm_mean": {
-                    key: float(np.mean(values))
-                    for key, values in group_grad_norms.items()
-                },
-                "parameter_groups": _group_norms(model, names, initial),
-                "cuda_peak_allocated_mib": (
-                    torch.cuda.max_memory_allocated() / 2 ** 20
-                ),
-            }
-            stream.write(json.dumps(record) + "\n")
-            stream.flush()
-            if val_r > best_score + 1e-3:
-                best_score = val_r
-                best_epoch = epoch + 1
-                bad_epochs = 0
-                torch.save(
-                    {"model": model.state_dict(), "epoch": best_epoch,
-                     "validation": metrics},
-                    output / "best.pt",
-                )
-            else:
-                bad_epochs += 1
-            if bad_epochs >= training["patience"]:
-                break
-    checkpoint = torch.load(
-        output / "best.pt", map_location=device, weights_only=True,
+        else:
+            truth = batch[1].to(target_device)
+            prediction = network(x)
+        return prediction, truth
+
+    checkpoint, final_norms = train_regressor(
+        model, train, validation, optimizer, scheduler,
+        "mse" if model_name == "hilo" else None,
+        device, forward, metric_values, names, initial, output,
+        training["epochs"], training["patience"],
     )
-    model.load_state_dict(checkpoint["model"])
-    truth, prediction = _predict(model, test, model_name, xyz, device)
-    metrics = metric_values(truth, prediction)
-    np.savez(output / "test_predictions.npz", y=truth, y_hat=prediction)
+    best_epoch = checkpoint["epoch"]
+    history = output / "history.jsonl"
     result = {
         "model": model_name,
         "subject": subject,
@@ -542,7 +485,6 @@ def fit_job(
         "delay_ms": delay,
         "best_epoch": best_epoch,
         "validation_selection_metric": "mean_finger_pearson_r",
-        "metrics": metrics,
         "boundaries": boundaries,
         "learning_rate_groups": {
             group["group_name"]: (
@@ -553,9 +495,117 @@ def fit_job(
             for group in optimizer.param_groups
         },
         "trainable_parameter_names": names,
-        "parameter_groups_final": _group_norms(model, names, initial),
-        "test_scored_after_restore": True,
+        "parameter_groups_final": final_norms,
         "history_path": str(history),
         "checkpoint_path": str(output / "best.pt"),
     }
+    if validation_only:
+        result["architecture"] = architecture
+        result["validation"] = checkpoint["validation"]
+        (output / marker).write_text(json.dumps(result, indent=2))
+        return
+    truth, prediction = predict(
+        model, loaders[2], device, forward,
+    )
+    result["metrics"] = metric_values(truth, prediction)
+    result["test_scored_after_restore"] = True
+    np.savez(output / "test_predictions.npz", y=truth, y_hat=prediction)
+    (output / marker).write_text(json.dumps(result, indent=2))
+
+
+
+def score_validation_fit(
+    root: Path,
+    config: dict,
+    subject: str,
+    fraction: float,
+    seed: int,
+    architecture: dict,
+) -> None:
+    """Score a selected CNN-GRU checkpoint once on held-out test rows.
+
+    Parameters
+    ----------
+    root : Path
+        Model-specific fit artifact root.
+    config : dict
+        Resolved training configuration.
+    subject : str
+        Subject identifier.
+    fraction : float
+        Fit-row fraction.
+    seed : int
+        Training random seed.
+    architecture : dict
+        Explicit CNN-GRU constructor hyperparameters.
+    """
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required for test scoring.")
+    output = (
+        root / "runs" / f"{int(fraction * 100)}pct"
+        / "cnn_gru" / subject / f"seed{seed}"
+    )
+    if (output / "result.json").is_file():
+        return
+    validation_path = output / "validation_result.json"
+    if not validation_path.is_file():
+        raise FileNotFoundError(
+            f"Validation fit is missing: {validation_path}."
+        )
+    result = json.loads(validation_path.read_text())
+    if result.get("architecture") != architecture:
+        raise ValueError(
+            f"Validation architecture differs: {validation_path}."
+        )
+    common = root / "prepared" / subject / "common"
+    train_y = np.load(common / "train_y.npy")
+    fit, validation = split_fit_rows(len(train_y), fraction)
+    train_indices = np.load(common / "train_indices.npy")
+    boundaries = result["boundaries"]
+    if boundaries["fit_indices_sha256"] != digest_array(
+        train_indices[fit]
+    ) or boundaries["validation_indices_sha256"] != digest_array(
+        train_indices[validation]
+    ):
+        raise ValueError("Validation fit rows differ from prepared rows.")
+    target = np.load(common / "test_y.npy")
+    grid = np.load(common / "test_indices.npy")
+    features = np.load(
+        root / "prepared" / subject / "corteg" / "0"
+        / "test_hi.npy", mmap_mode="r",
+    )[..., 0]
+    with np.load(output / "normalization.npz") as saved:
+        x = ((features - saved["x_mean"]) / saved["x_std"]
+             ).astype(np.float32)
+        y = ((target - saved["y_mean"]) / saved["y_std"]
+             ).astype(np.float32)
+    if not np.isfinite(x).all() or not np.isfinite(y).all():
+        raise ValueError("Normalized test features or targets are nonfinite.")
+    device = torch.device("cuda:0")
+    model = TemporalSpatialCNNGRU(
+        input_channels=x.shape[1], input_length=x.shape[2],
+        outputs=FINGER_COUNT, **architecture,
+    ).to(device)
+    checkpoint = torch.load(
+        output / "best.pt", map_location=device, weights_only=True,
+    )
+    if checkpoint["epoch"] != result["best_epoch"]:
+        raise ValueError("Best epoch differs from validation result.")
+    model.load_state_dict(checkpoint["model"])
+    loader = DataLoader(
+        TensorDataset(torch.from_numpy(x), torch.from_numpy(y)),
+        batch_size=config["training"]["batch_size"], shuffle=False,
+    )
+    truth, prediction = _predict(
+        model, loader, "cnn_gru", None, device,
+    )
+    result["metrics"] = metric_values(truth, prediction)
+    result["test_scored_after_restore"] = True
+    boundaries.update({
+        "test_grid_sha256": digest_array(grid),
+        "test_window_count": len(grid),
+        "test_first_target": int(grid[0]),
+        "target_values_sha256": digest_array(target),
+    })
+    np.savez(output / "test_predictions.npz", y=truth, y_hat=prediction)
     (output / "result.json").write_text(json.dumps(result, indent=2))

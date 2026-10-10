@@ -31,21 +31,40 @@ class TemporalSpatialCNNGRU(nn.Module):
         Number of samples per input window.
     outputs : int
         Number of regression or classification outputs.
+    n_convolution_layers : int, optional
+        Number of convolution blocks. Default is 3.
+    conv_stride : int, optional
+        Temporal convolution stride. Default is 3.
+    drop_out : float, optional
+        Block dropout probability. Default is 0.3.
     """
 
     def __init__(
         self, input_channels: int, input_length: int, outputs: int,
+        n_convolution_layers: int = CONV_BLOCKS,
+        conv_stride: int = CONV_STRIDE,
+        drop_out: float = DROPOUT,
     ) -> None:
         super().__init__()
         if min(input_channels, input_length, outputs) < 1:
             raise ValueError(
                 "Input channels, length, and outputs must be positive."
             )
+        if type(n_convolution_layers) is not int or (
+            n_convolution_layers < 1
+        ):
+            raise ValueError(
+                "n_convolution_layers must be a positive integer."
+            )
+        if type(conv_stride) is not int or conv_stride < 1:
+            raise ValueError("conv_stride must be a positive integer.")
+        if not 0 <= drop_out < 1:
+            raise ValueError("drop_out must be in [0, 1).")
         self.channels = input_channels
         self.input_length = input_length
         self.conv_timespat = nn.Conv2d(
             1, FILTERS, (FILTER_LENGTH, input_channels),
-            stride=(CONV_STRIDE, 1),
+            stride=(conv_stride, 1),
         )
         self.bnorm = nn.BatchNorm2d(FILTERS, affine=True, eps=1e-5)
         self.activation = nn.ELU()
@@ -54,14 +73,14 @@ class TemporalSpatialCNNGRU(nn.Module):
             stride=(POOL_STRIDE, 1),
         )
         blocks: list[nn.Module] = []
-        for index in range(CONV_BLOCKS):
+        for index in range(n_convolution_layers):
             blocks.extend((
-                nn.Dropout(p=DROPOUT),
+                nn.Dropout(p=drop_out),
                 nn.Conv2d(
                     FILTERS, FILTERS, (FILTER_LENGTH, 1),
-                    stride=(CONV_STRIDE, 1),
+                    stride=(conv_stride, 1),
                     padding=(
-                        ((FILTER_LENGTH - 1) * CONV_STRIDE) // 2,
+                        ((FILTER_LENGTH - 1) * conv_stride) // 2,
                         0,
                     ),
                 ),
