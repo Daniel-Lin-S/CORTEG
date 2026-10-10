@@ -81,6 +81,8 @@ def semantic_identity(config: dict) -> tuple[str, dict]:
         "checkpoint_sha256": config["checkpoint_sha256"],
         "model_source_sha256": model_hashes,
     }
+    if config["delay_ms"]:
+        semantics["delay_ms"] = config["delay_ms"]
     canonical = json.dumps(semantics, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()[:12], semantics
 
@@ -94,11 +96,12 @@ def artifact_root(config: dict) -> Path:
 def _save_selections(provenance: Path, config: dict) -> None:
     """Union job selectors while recording the exact latest invocation."""
     path = provenance / "selections.json"
-    keys = ("subjects", "delay_subjects", "fractions", "seeds")
+    keys = ("subjects", "models", "fractions", "seeds")
     current = json.loads(path.read_text()) if path.exists() else {
         key: [] for key in keys
     }
     for key in keys:
+        current.setdefault(key, [])
         for item in config[key]:
             if item not in current[key]:
                 current[key].append(item)
@@ -124,7 +127,7 @@ def _legacy_training_matches(candidate: Path, config: dict) -> bool:
         return False
     old = json.loads(paths[0].read_text())
     if any(old.get(key) != config[key] for key in (
-        "name", "training", "checkpoint_sha256"
+        "training", "checkpoint_sha256"
     )):
         return False
     source_hashes = json.loads(paths[1].read_text()).get(
@@ -171,16 +174,37 @@ def _adopt_legacy_runs(
     source = Path(source_name)
     if not _legacy_training_matches(source, config):
         return
-    source_runs = source / "runs"
     linked = 0
-    for result in source_runs.glob("*/*/*/seed*/result.json"):
-        relative = result.parent.relative_to(source_runs)
-        target = root / "runs" / relative
-        if target.exists() or target.is_symlink():
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.symlink_to(result.parent)
-        linked += 1
+    for subject in config["subjects"]:
+        for job in jobs_for_subject(subject, config):
+            result = job_path(source, job) / "result.json"
+            if not result.is_file():
+                continue
+            saved = json.loads(result.read_text())
+            fields = ("subject", "model", "fraction", "seed")
+            if any(saved.get(key) != job[key] for key in fields):
+                raise ValueError(f"Legacy result job differs: {result}.")
+            if saved.get("delay_ms") != job["delay"]:
+                raise ValueError(f"Legacy result delay differs: {result}.")
+            if not saved.get("test_scored_after_restore"):
+                raise ValueError(f"Legacy result lacks test audit: {result}.")
+            metrics = saved.get("metrics", {}).get("overall", {})
+            if set(metrics) != set(METRICS) or not np.isfinite(
+                list(metrics.values())
+            ).all():
+                raise ValueError(
+                    f"Legacy result metrics are invalid: {result}."
+                )
+            if not (result.parent / "best.pt").is_file():
+                raise ValueError(
+                    f"Legacy validation checkpoint is missing: {result}."
+                )
+            target = job_path(root, job)
+            if target.exists() or target.is_symlink():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.symlink_to(result.parent)
+            linked += 1
     record = root / "provenance" / "adopted_runs.json"
     if not record.exists():
         record.write_text(json.dumps({
@@ -285,6 +309,8 @@ def _artifact_config(root: Path) -> dict:
     selections = root / "provenance" / "selections.json"
     if selections.exists():
         config.update(json.loads(selections.read_text()))
+    config.setdefault("delay_ms", 0)
+    config.setdefault("models", ["corteg", "hilo"])
     return config
 
 
@@ -336,26 +362,15 @@ def select_gpus() -> list[int]:
 
 
 def jobs_for_subject(subject: str, config: dict) -> list[dict]:
-    """Enumerate the approved independent fits for one patient."""
-    jobs = []
-    for fraction, model, seed in itertools.product(
-        config["fractions"], ("corteg", "hilo"), config["seeds"]
-    ):
-        jobs.append({
-            "subject": subject, "fraction": fraction,
-            "model": model, "seed": seed, "delay": 0,
-        })
-    if subject in config["delay_subjects"]:
-        jobs += [{
-            "subject": subject, "fraction": 1.0,
-            "model": "corteg", "seed": seed, "delay": 40,
-        } for seed in config["seeds"]]
+    """Enumerate configured independent fits for one patient."""
+    jobs = [{
+        "subject": subject, "fraction": fraction,
+        "model": model, "seed": seed, "delay": config["delay_ms"],
+    } for fraction, model, seed in itertools.product(
+        config["fractions"], config["models"], config["seeds"]
+    )]
     jobs.sort(key=lambda job: (
-        0 if job["subject"] == "mv" and job["model"] == "corteg"
-        and job["fraction"] == 1.0 and job["seed"] == 0
-        and job["delay"] == 0 else 1,
-        job["delay"], job["fraction"] != 1.0,
-        job["model"] != "corteg", job["seed"],
+        -job["fraction"], job["model"] != "corteg", job["seed"],
     ))
     return jobs
 
@@ -439,18 +454,17 @@ def coordinate(root: Path, config: dict) -> None:
     ) for gpu in selected]
     for thread in threads:
         thread.start()
-    ordered = [subject for subject in ("mv", *config["subjects"])
-               if subject in config["subjects"]]
-    ordered = list(dict.fromkeys(ordered))
+    ordered = list(dict.fromkeys(config["subjects"]))
     try:
         expected = sum(len(jobs_for_subject(subject, config))
                        for subject in ordered)
         if expected == 0:
             raise ValueError("The campaign has no subject-level jobs.")
         for subject in ordered:
-            delays = (0, 40) if subject in config["delay_subjects"] else (0,)
             _event(root, {"state": "preparing", "subject": subject}, lock)
-            reused = prepare_cached_subject(subject, config, delays)
+            reused = prepare_cached_subject(
+                subject, config, (config["delay_ms"],)
+            )
             _refresh_input_hashes(root, config)
             _event(root, {
                 "state": "reused" if reused else "prepared",
@@ -501,18 +515,19 @@ def _holm(pvalues: dict[str, float]) -> dict[str, float]:
 
 def report(root: Path, config: dict) -> dict:
     """Aggregate completed seeds and paired subjects without imputations."""
-    summary: dict = {"fractions": {}, "delay_probe": {}}
+    summary: dict = {"delay_ms": config["delay_ms"], "fractions": {}}
     for fraction in config["fractions"]:
         name = f"{int(fraction * 100)}pct"
         per_subject = {}
         for subject in config["subjects"]:
             pair = {}
-            for model in ("corteg", "hilo"):
+            for model in config["models"]:
                 values = []
                 for seed in config["seeds"]:
                     path = job_path(root, {
                         "subject": subject, "fraction": fraction,
-                        "model": model, "seed": seed, "delay": 0,
+                        "model": model, "seed": seed,
+                        "delay": config["delay_ms"],
                     }) / "result.json"
                     if path.exists():
                         values.append(json.loads(path.read_text())[
@@ -527,10 +542,17 @@ def report(root: Path, config: dict) -> dict:
                                 else None for key in METRICS},
                     }
             per_subject[subject] = pair
-        complete = len(config["subjects"]) >= 2 and all(
-            all(per_subject[subject].get(model, {}).get("seeds")
-                == len(config["seeds"]) for model in ("corteg", "hilo"))
-            for subject in config["subjects"]
+        complete = (
+            set(config["models"]) == {"corteg", "hilo"}
+            and len(config["subjects"]) >= 2
+            and all(
+                all(
+                    per_subject[subject].get(model, {}).get("seeds")
+                    == len(config["seeds"])
+                    for model in ("corteg", "hilo")
+                )
+                for subject in config["subjects"]
+            )
         )
         entry = {"subjects": per_subject, "paired_complete": complete}
         if complete:
@@ -550,24 +572,6 @@ def report(root: Path, config: dict) -> dict:
                 for key, value in differences.items()
             }
         summary["fractions"][name] = entry
-    for subject in config["delay_subjects"]:
-        probe = {}
-        for delay in (0, 40):
-            values = []
-            for seed in config["seeds"]:
-                path = job_path(root, {
-                    "subject": subject, "fraction": 1.0,
-                    "model": "corteg", "seed": seed, "delay": delay,
-                }) / "result.json"
-                if path.exists():
-                    values.append(json.loads(path.read_text())[
-                        "metrics"]["overall"])
-            probe[str(delay)] = {
-                "seeds": len(values),
-                "mean": {key: float(np.mean([row[key] for row in values]))
-                         for key in METRICS} if values else None,
-            }
-        summary["delay_probe"][subject] = probe
     path = root / "reports" / "summary.json"
     path.write_text(json.dumps(summary, indent=2))
     return summary
@@ -593,8 +597,9 @@ def main() -> None:
         config = resolve_campaign(args.config)
         subjects = ensure_cache(config)
         for subject in config["subjects"]:
-            delays = (0, 40) if subject in config["delay_subjects"] else (0,)
-            reused = prepare_cached_subject(subject, config, delays)
+            reused = prepare_cached_subject(
+                subject, config, (config["delay_ms"],)
+            )
             print(
                 f"{subject}: {'reused' if reused else 'prepared'} "
                 f"{subjects / subject}", flush=True,

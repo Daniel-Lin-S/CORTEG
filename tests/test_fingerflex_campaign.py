@@ -42,12 +42,18 @@ from scripts.fingerflex_campaign import (
     rank_gpus,
     artifact_root,
     ensure_artifact,
+    report,
+    semantic_identity,
     source_revision,
 )
 
 CONFIG = resolve_campaign(
     Path(__file__).resolve().parents[1]
     / "configs" / "fingerflex_campaign.json"
+)
+PROBE = resolve_campaign(
+    Path(__file__).resolve().parents[1]
+    / "configs" / "fingerflex_delay40ms.json"
 )
 
 
@@ -208,13 +214,22 @@ class FingerflexCampaignTests(unittest.TestCase):
                 / "bp" / "seed0" / "result.json"
             )
             legacy_result.parent.mkdir(parents=True)
-            legacy_result.write_text("{}")
+            legacy_result.write_text(json.dumps({
+                "subject": "bp", "model": "corteg",
+                "fraction": 1.0, "seed": 0, "delay_ms": 0,
+                "test_scored_after_restore": True,
+                "metrics": {"overall": {
+                    "pearson_r": 0.5, "mse": 0.8, "r2": 0.1,
+                }},
+            }))
+            (legacy_result.parent / "best.pt").write_bytes(b"fixture")
             config = dict(CONFIG)
             config.update({
                 "artifact_base": str(base),
                 "raw_root": str(raw_root),
                 "subjects": ["bp"],
-                "delay_subjects": [],
+                "delay_ms": 0,
+                "models": ["corteg", "hilo"],
             })
             shared = ensure_cache(config)
             self.assertTrue((shared / "bp" / "common").is_symlink())
@@ -260,11 +275,51 @@ class FingerflexCampaignTests(unittest.TestCase):
                 preparation_id(config), preparation_id(changed_prep)
             )
 
+
+
+    def test_probe_report_omits_paired_model_test(self) -> None:
+        """One-model reports retain seeds without a paired-model p-value."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for subject in PROBE["subjects"]:
+                for job in jobs_for_subject(subject, PROBE):
+                    output = job_path(root, job)
+                    output.mkdir(parents=True)
+                    (output / "result.json").write_text(json.dumps({
+                        "metrics": {"overall": {
+                            "pearson_r": 0.5, "mse": 0.8, "r2": 0.1,
+                        }},
+                    }))
+            (root / "reports").mkdir()
+            summary = report(root, PROBE)
+            self.assertEqual(summary["delay_ms"], 40)
+            fraction = summary["fractions"]["100pct"]
+            self.assertFalse(fraction["paired_complete"])
+            self.assertNotIn("paired_test", fraction)
+            self.assertEqual(
+                fraction["subjects"]["bp"]["corteg"]["seeds"], 3
+            )
+
     def test_report_family_and_job_count(self) -> None:
         """Count approved jobs and correct only the three metrics."""
         total = sum(len(jobs_for_subject(subject, CONFIG))
                     for subject in CONFIG["subjects"])
-        self.assertEqual(total, 171)
+        self.assertEqual(total, 162)
+        probe_total = sum(
+            len(jobs_for_subject(subject, PROBE))
+            for subject in PROBE["subjects"]
+        )
+        self.assertEqual(probe_total, 9)
+        self.assertEqual(preparation_id(CONFIG), preparation_id(PROBE))
+        self.assertNotEqual(
+            semantic_identity(CONFIG)[0], semantic_identity(PROBE)[0]
+        )
+        self.assertTrue(all(
+            job["delay"] == 40 and job["model"] == "corteg"
+            and job["fraction"] == 1.0
+            for subject in PROBE["subjects"]
+            for job in jobs_for_subject(subject, PROBE)
+        ))
         adjusted = _holm({"pearson_r": 0.01, "mse": 0.2,
                           "r2": 0.03})
         self.assertEqual(adjusted["pearson_r"], 0.03)

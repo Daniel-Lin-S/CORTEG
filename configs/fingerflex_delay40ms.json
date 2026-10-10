@@ -1,0 +1,40 @@
+{
+  "name": "stanford_finger_small_40ms",
+  "raw_root": "/data/neural_data/datasets/fingerflex_stanford-unknown-b1784a19-af7c-4094-bb05-1bb1aca8c59d/data",
+  "artifact_base": "/data/lyh/CORTEG/fingerflex_stanford",
+  "checkpoint": "/data/lyh/model_weights/ST-EEGFormer-small/checkpoint-300.pth",
+  "subjects": [
+    "bp",
+    "jp",
+    "mv"
+  ],
+  "delay_ms": 40,
+  "models": [
+    "corteg"
+  ],
+  "fractions": [
+    1.0
+  ],
+  "seeds": [
+    0,
+    1,
+    2
+  ],
+  "training": {
+    "epochs": 200,
+    "patience": 30,
+    "batch_size": 128,
+    "base_lr": 0.001,
+    "adapter_lr_high": 0.01,
+    "adapter_lr_low": 0.002,
+    "weight_decay": 0.005,
+    "lora_last_n": 4,
+    "lora_rank": 4,
+    "lora_alpha": 16,
+    "lora_dropout": 0.2,
+    "warmup_epochs": 10,
+    "min_lr": 1e-05
+  },
+  "checkpoint_sha256": "98d2848abdaea7a143d399c07f67f8782e07dd66e7c309ddb058c7158a8a8b02",
+  "preprocessing_config": "configs/stanford_preprocessing.json"
+}

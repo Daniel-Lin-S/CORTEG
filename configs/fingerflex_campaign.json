@@ -14,10 +14,10 @@
     "wm",
     "zt"
   ],
-  "delay_subjects": [
-    "bp",
-    "jp",
-    "mv"
+  "delay_ms": 0,
+  "models": [
+    "corteg",
+    "hilo"
   ],
   "fractions": [
     1.0,

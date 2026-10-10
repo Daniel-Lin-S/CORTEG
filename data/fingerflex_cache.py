@@ -80,6 +80,29 @@ def resolve_campaign(path: Path) -> dict:
         Full configuration with ``preprocessing`` resolved from its own file.
     """
     config = json.loads(path.read_text())
+    delay = config["delay_ms"]
+    if delay not in (0, MAX_DELAY):
+        raise ValueError(
+            f"Delay must be 0 or {MAX_DELAY} ms, got {delay}."
+        )
+    models = config["models"]
+    if not models or len(set(models)) != len(models) or (
+        set(models) - {"corteg", "hilo"}
+    ):
+        raise ValueError(
+            f"Models must be unique CORTEG/HiLo selections, got {models}."
+        )
+    for key in ("subjects", "fractions", "seeds"):
+        values = config[key]
+        if not values or len(set(values)) != len(values):
+            raise ValueError(
+                f"{key} must contain unique nonempty selections, "
+                f"got {values}."
+            )
+    if any(not 0 < value <= 1 for value in config["fractions"]):
+        raise ValueError(
+            f"Fractions must lie in (0, 1], got {config['fractions']}."
+        )
     if "preprocessing" in config:
         raise ValueError(
             f"Move preprocessing settings out of training config: {path}."
