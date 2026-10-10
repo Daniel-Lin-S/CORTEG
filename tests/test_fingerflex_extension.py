@@ -23,11 +23,21 @@ from scripts.fingerflex_fit_campaigns import (
     fit_semantics,
     pls_cpu_command,
 )
-from scripts.fingerflex_comparison import ensure_comparison, report
+from scripts.fingerflex_comparison import (
+    _paired_wilcoxon, ensure_comparison, report,
+)
 
 
 class FingerflexExtensionTests(unittest.TestCase):
     """Protect the deterministic baseline and report contracts."""
+
+    def test_paired_wilcoxon_subject_differences(self) -> None:
+        """Use two-sided signed ranks and handle zero differences."""
+        values = np.array([1.0, 2.0, 3.0, 4.0])
+        self.assertAlmostEqual(_paired_wilcoxon(values), 0.125)
+        self.assertEqual(_paired_wilcoxon(np.zeros(3)), 1.0)
+        with self.assertRaisesRegex(ValueError, "finite subject"):
+            _paired_wilcoxon(np.array([1.0, np.nan]))
 
     def test_pls_cpu_limits_apply_to_child(self) -> None:
         """PLS limits and priorities are inherited by the fit process."""
@@ -266,7 +276,7 @@ class FingerflexExtensionTests(unittest.TestCase):
                     "not_applicable",
                 )
             self.assertTrue(
-                (comparison / "reports" / "plots"
+                (comparison / "plots"
                  / "paired_matrix.png").is_file()
             )
             changed = (
@@ -282,6 +292,19 @@ class FingerflexExtensionTests(unittest.TestCase):
                 ValueError, "target rows or target values",
             ):
                 report(comparison)
+            index_path = comparison / "index.json"
+            index = json.loads(index_path.read_text())
+            index["fit_roots"].pop("pls")
+            index["semantics"]["fit_ids"].pop("pls")
+            index_path.write_text(json.dumps(index))
+            subset = report(comparison)
+            self.assertEqual(subset["models"], [
+                "corteg", "hilo", "cnn_gru",
+            ])
+            self.assertTrue(all(
+                len(row["comparisons"]) == 3
+                for row in subset["fractions"].values()
+            ))
 
 
 if __name__ == "__main__":
