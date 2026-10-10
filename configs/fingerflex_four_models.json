@@ -1,0 +1,26 @@
+{
+  "name": "stanford_finger_four_models_0ms",
+  "source_campaign": "configs/fingerflex_campaign.json",
+  "subjects": ["bp", "cc", "ht", "jc", "jp", "mv", "wc", "wm", "zt"],
+  "fractions": [1.0, 0.25, 0.1],
+  "seeds": [0, 1, 2],
+  "models": ["corteg", "hilo", "pls", "cnn_gru"],
+  "pls": {
+    "max_components": 50
+  },
+  "cnn_gru": {
+    "epochs": 200,
+    "patience": 30,
+    "batch_size": 128,
+    "base_lr": 0.001,
+    "weight_decay": 0.005,
+    "warmup_epochs": 10,
+    "min_lr": 0.00001
+  },
+  "comparison": {
+    "metrics": ["pearson_r", "mse", "r2"],
+    "paired_unit": "subject",
+    "test": "exact_sign_flip",
+    "holm_family": "metrics_within_pair_and_fraction"
+  }
+}

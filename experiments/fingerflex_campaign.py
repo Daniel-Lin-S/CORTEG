@@ -27,6 +27,9 @@ from experiments.run_regression_hilo_clean import (
 )
 from models.steegformer.probe import configure_lora_lastn_probe
 from train.lr_schedule import WarmupCosineLR
+from models.temporal_spatial_cnn_gru import (
+    TemporalSpatialCNNGRU,
+)
 
 MIN_STD = 1e-3
 CLIP_Z = 5.0
@@ -73,7 +76,7 @@ def normalize(
     train, val, test : np.ndarray
         Feature arrays with sample axis first.
     model : str
-        ``corteg`` or ``hilo``.
+        ``corteg``, ``hilo``, or ``cnn_gru``.
 
     Returns
     -------
@@ -82,7 +85,7 @@ def normalize(
     """
     if len(train) == 0:
         raise ValueError("Cannot normalize an empty fit set.")
-    axes = (0, 2) if model == "corteg" else (0,)
+    axes = (0, 2) if model in ("corteg", "cnn_gru") else (0,)
     mean = train.mean(axis=axes, keepdims=True)
     std = train.std(axis=axes, keepdims=True)
     std = np.maximum(std, MIN_STD if model == "hilo" else 1e-6)
@@ -255,8 +258,13 @@ def _load_arrays(
         raise ValueError("Selected fit targets contain a constant finger.")
     y_arrays = tuple(((x - y_mean) / y_std).astype(np.float32)
                      for x in (train_y[fit], train_y[val], test_y))
-    train_x = np.load(feature_root / "train_x.npy", mmap_mode="r")
-    test_x = np.load(feature_root / "test_x.npy", mmap_mode="r")
+    if model == "cnn_gru":
+        feature_root = root / subject / "corteg" / str(delay)
+        train_x = np.load(feature_root / "train_hi.npy", mmap_mode="r")[..., 0]
+        test_x = np.load(feature_root / "test_hi.npy", mmap_mode="r")[..., 0]
+    else:
+        train_x = np.load(feature_root / "train_x.npy", mmap_mode="r")
+        test_x = np.load(feature_root / "test_x.npy", mmap_mode="r")
     x_arrays, x_mean, x_std = normalize(
         train_x[fit], train_x[val], test_x, model,
     )
@@ -397,7 +405,11 @@ def fit_job(
             arrays["x"][0].shape[1], xyz_np,
             Path(config["checkpoint"]), training,
         ) if model_name == "corteg"
-        else _hilo_model(
+        else TemporalSpatialCNNGRU(
+            input_channels=arrays["x"][0].shape[1],
+            input_length=arrays["x"][0].shape[2],
+            outputs=FINGER_COUNT,
+        ) if model_name == "cnn_gru" else _hilo_model(
             arrays["x"][0].shape[1], Path(config["hilo_source"])
         )
     ).to(device)
