@@ -35,3 +35,8 @@ feature normalization statistics use only those selected fit rows. Saved
 per-patient metadata includes the split boundary, retained channels, channel
 variance, and target-grid/value hashes. Prepared feature arrays are shared
 across seeds and training fractions; the 40 ms feature arrays are separate.
+
+Resolved cleaning settings come from
+`configs/stanford_preprocessing.json`. Prepared arrays are keyed by those
+settings and the sample-extraction version in a shared preprocessing cache;
+subsequent studies can link the same samples without copying them.

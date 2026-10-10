@@ -29,39 +29,6 @@
     1,
     2
   ],
-  "preprocessing": {
-    "ecog_scale": 0.0298,
-    "split": {
-      "duration_cutoff_seconds": 600,
-      "at_or_above_cutoff": {
-        "train_seconds": 400
-      },
-      "below_cutoff": {
-        "train_parts": 2,
-        "total_parts": 3
-      }
-    },
-    "notch_bands_hz": [
-      [
-        59.5,
-        60.5
-      ],
-      [
-        119.5,
-        120.5
-      ],
-      [
-        179.5,
-        180.5
-      ]
-    ],
-    "notch_filter_order": 3,
-    "bad_channel": {
-      "variance_normalization": 0,
-      "low_variance_multiplier": 0.2,
-      "high_variance_multiplier": 5.0
-    }
-  },
   "training": {
     "epochs": 200,
     "patience": 30,
@@ -77,5 +44,6 @@
     "warmup_epochs": 10,
     "min_lr": 1e-05
   },
-  "checkpoint_sha256": "98d2848abdaea7a143d399c07f67f8782e07dd66e7c309ddb058c7158a8a8b02"
+  "checkpoint_sha256": "98d2848abdaea7a143d399c07f67f8782e07dd66e7c309ddb058c7158a8a8b02",
+  "preprocessing_config": "configs/stanford_preprocessing.json"
 }

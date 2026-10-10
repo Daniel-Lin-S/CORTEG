@@ -18,6 +18,15 @@ import torch
 from torch import nn
 
 from data.fingerflex_campaign import clean_recording, target_grid
+from data.fingerflex_cache import (
+    LEGACY_PREPARATION_SHA256,
+    cache_root,
+    ensure_cache,
+    preparation_id,
+    prepare_cached_subject,
+    resolve_campaign,
+    sha256_file,
+)
 from experiments.fingerflex_campaign import (
     metric_values,
     normalize,
@@ -31,11 +40,14 @@ from scripts.fingerflex_campaign import (
     job_path,
     jobs_for_subject,
     rank_gpus,
+    artifact_root,
+    ensure_artifact,
+    source_revision,
 )
 
-CONFIG = json.loads(
-    (Path(__file__).resolve().parents[1]
-     / "configs" / "fingerflex_campaign.json").read_text()
+CONFIG = resolve_campaign(
+    Path(__file__).resolve().parents[1]
+    / "configs" / "fingerflex_campaign.json"
 )
 
 
@@ -126,6 +138,128 @@ class FingerflexCampaignTests(unittest.TestCase):
             events = (root / "status" / "jobs.jsonl").read_text()
             self.assertIn('"state": "skipped"', events)
 
+    def test_preparation_cache_independent_of_training(self) -> None:
+        """Changing training creates a new run but reuses sample arrays."""
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            raw_root = base / "raw"
+            raw_path = raw_root / "bp" / "bp_fingerflex.mat"
+            raw_path.parent.mkdir(parents=True)
+            raw_path.write_bytes(b"registered raw fixture")
+            legacy = base / "legacy"
+            provenance = legacy / "provenance"
+            provenance.mkdir(parents=True)
+            prep = {
+                key: CONFIG["preprocessing"][key]
+                for key in (
+                    "ecog_scale", "split", "notch_bands_hz",
+                    "notch_filter_order", "bad_channel",
+                )
+            }
+            (provenance / "resolved_config.json").write_text(
+                json.dumps({
+                    "preprocessing": prep,
+                    "delay_subjects": [],
+                    "name": CONFIG["name"],
+                    "training": CONFIG["training"],
+                    "checkpoint_sha256": CONFIG["checkpoint_sha256"],
+                })
+            )
+            (provenance / "semantics.json").write_text(json.dumps({
+                "campaign_source_sha256": {
+                    "data/fingerflex_campaign.py": (
+                        LEGACY_PREPARATION_SHA256
+                    ),
+                    "experiments/fingerflex_campaign.py": sha256_file(
+                        Path(__file__).resolve().parents[1]
+                        / "experiments" / "fingerflex_campaign.py"
+                    ),
+                }
+            }))
+            (provenance / "input_hashes.json").write_text(json.dumps({
+                "raw_sha256": {"bp": sha256_file(raw_path)},
+                "corteg_revision": source_revision(
+                    Path(__file__).resolve().parents[1]
+                ),
+                "hilo_revision": source_revision(
+                    Path("/home/lyh/codes/HiLoFuseNet")
+                ),
+            }))
+            prepared = legacy / "prepared" / "bp"
+            for parent, files in (
+                (prepared / "common", (
+                    "metadata.json", "train_y.npy", "test_y.npy",
+                    "train_indices.npy", "test_indices.npy",
+                    "xyz_mm.npy",
+                )),
+                (prepared / "corteg" / "0", (
+                    "train_x.npy", "test_x.npy", "train_hi.npy",
+                    "test_hi.npy",
+                )),
+                (prepared / "hilo" / "0", (
+                    "train_x.npy", "test_x.npy",
+                )),
+            ):
+                parent.mkdir(parents=True)
+                for filename in files:
+                    (parent / filename).write_bytes(b"fixture")
+            legacy_result = (
+                legacy / "runs" / "100pct" / "corteg"
+                / "bp" / "seed0" / "result.json"
+            )
+            legacy_result.parent.mkdir(parents=True)
+            legacy_result.write_text("{}")
+            config = dict(CONFIG)
+            config.update({
+                "artifact_base": str(base),
+                "raw_root": str(raw_root),
+                "subjects": ["bp"],
+                "delay_subjects": [],
+            })
+            shared = ensure_cache(config)
+            self.assertTrue((shared / "bp" / "common").is_symlink())
+            with patch("data.fingerflex_cache.prepare_subject") as prepare:
+                self.assertTrue(
+                    prepare_cached_subject("bp", config, (0,))
+                )
+            prepare.assert_not_called()
+            first = ensure_artifact(config)
+            self.assertEqual((first / "prepared").resolve(), shared)
+            adopted_result = (
+                first / "runs" / "100pct" / "corteg"
+                / "bp" / "seed0" / "result.json"
+            )
+            self.assertTrue(adopted_result.is_file())
+            self.assertTrue(adopted_result.parent.is_symlink())
+            modified = dict(config)
+            modified["training"] = dict(config["training"])
+            modified["training"]["base_lr"] = 0.0005
+            second = ensure_artifact(modified)
+            self.assertNotEqual(first, second)
+            self.assertEqual((second / "prepared").resolve(), shared)
+            self.assertFalse((
+                second / "runs" / "100pct" / "corteg"
+                / "bp" / "seed0"
+            ).exists())
+            self.assertEqual(cache_root(config), cache_root(modified))
+            added = dict(config)
+            added["seeds"] = [0, 1, 2, 3]
+            added["subjects"] = ["bp", "cc"]
+            self.assertEqual(artifact_root(added), first)
+            changed_prep = dict(config)
+            changed_prep["preprocessing"] = dict(
+                config["preprocessing"]
+            )
+            changed_prep["preprocessing"]["bad_channel"] = dict(
+                config["preprocessing"]["bad_channel"]
+            )
+            changed_prep["preprocessing"]["bad_channel"][
+                "high_variance_multiplier"
+            ] = 4.0
+            self.assertNotEqual(
+                preparation_id(config), preparation_id(changed_prep)
+            )
+
     def test_report_family_and_job_count(self) -> None:
         """Count approved jobs and correct only the three metrics."""
         total = sum(len(jobs_for_subject(subject, CONFIG))
@@ -136,6 +270,7 @@ class FingerflexCampaignTests(unittest.TestCase):
         self.assertEqual(adjusted["pearson_r"], 0.03)
         self.assertEqual(adjusted["r2"], 0.06)
         self.assertEqual(_paired_test(np.zeros(9)), 1.0)
+        self.assertEqual(_paired_test(np.zeros(3)), 1.0)
 
 
 if __name__ == "__main__":

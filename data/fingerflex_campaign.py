@@ -253,37 +253,58 @@ def prepare_subject(
     clean, kept, variance = clean_recording(
         ecog, boundary, config["preprocessing"],
     )
-    common.mkdir(parents=True, exist_ok=True)
-    _write_array(common / "xyz_mm.npy", locs[kept].astype(np.float32))
-    for part, start, stop in (
-        ("train", 0, boundary),
-        ("test", boundary, len(clean)),
-    ):
-        grid = target_grid(stop - start, 0)
-        targets = flex[start + grid].astype(np.float32)
-        _write_array(common / f"{part}_y.npy", targets)
-        _write_array(common / f"{part}_indices.npy", start + grid)
-    metadata = {
-        "raw_path": str(raw_path),
-        "raw_samples": len(ecog),
-        "split_boundary": boundary,
-        "split_rule": rule,
-        "kept_channels_zero_based": kept.tolist(),
-        "bad_channels_zero_based": np.setdiff1d(
-            np.arange(ecog.shape[1]), kept,
-        ).tolist(),
-        "channel_variance": variance.tolist(),
-        "median_channel_variance": float(np.median(variance)),
-        "target_grid_sha256": {
-            part: digest_array(np.load(common / f"{part}_indices.npy"))
-            for part in ("train", "test")
-        },
-        "target_values_sha256": {
-            part: digest_array(np.load(common / f"{part}_y.npy"))
-            for part in ("train", "test")
-        },
-    }
-    (common / "metadata.json").write_text(json.dumps(metadata, indent=2))
+    metadata_path = common / "metadata.json"
+    if metadata_path.exists():
+        previous = json.loads(metadata_path.read_text())
+        if (previous["raw_samples"] != len(ecog)
+                or previous["split_boundary"] != boundary
+                or previous["kept_channels_zero_based"] != kept.tolist()):
+            raise ValueError(
+                f"Existing prepared channels or split differ: {common}."
+            )
+        for part, start, stop in (
+            ("train", 0, boundary),
+            ("test", boundary, len(clean)),
+        ):
+            grid = target_grid(stop - start, 0)
+            if digest_array(start + grid) != (
+                previous["target_grid_sha256"][part]
+            ):
+                raise ValueError(
+                    f"Existing target grid differs: {common}."
+                )
+    else:
+        common.mkdir(parents=True, exist_ok=True)
+        _write_array(common / "xyz_mm.npy", locs[kept].astype(np.float32))
+        for part, start, stop in (
+            ("train", 0, boundary),
+            ("test", boundary, len(clean)),
+        ):
+            grid = target_grid(stop - start, 0)
+            targets = flex[start + grid].astype(np.float32)
+            _write_array(common / f"{part}_y.npy", targets)
+            _write_array(common / f"{part}_indices.npy", start + grid)
+        metadata = {
+            "raw_path": str(raw_path),
+            "raw_samples": len(ecog),
+            "split_boundary": boundary,
+            "split_rule": rule,
+            "kept_channels_zero_based": kept.tolist(),
+            "bad_channels_zero_based": np.setdiff1d(
+                np.arange(ecog.shape[1]), kept,
+            ).tolist(),
+            "channel_variance": variance.tolist(),
+            "median_channel_variance": float(np.median(variance)),
+            "target_grid_sha256": {
+                part: digest_array(np.load(common / f"{part}_indices.npy"))
+                for part in ("train", "test")
+            },
+            "target_values_sha256": {
+                part: digest_array(np.load(common / f"{part}_y.npy"))
+                for part in ("train", "test")
+            },
+        }
+        metadata_path.write_text(json.dumps(metadata, indent=2))
     for part, start, stop in (
         ("train", 0, boundary),
         ("test", boundary, len(clean)),
@@ -297,8 +318,18 @@ def prepare_subject(
                     continue
                 out = subject_root / model / str(delay)
                 out.mkdir(parents=True, exist_ok=True)
-                if (out / f"{part}_x.npy").exists():
+                x_path = out / f"{part}_x.npy"
+                hi_path = out / f"{part}_hi.npy"
+                if x_path.exists():
+                    if model == "corteg" and not hi_path.exists():
+                        raise ValueError(
+                            f"Incomplete CORTEG feature pair: {out}."
+                        )
                     continue
+                if model == "corteg" and hi_path.exists():
+                    raise ValueError(
+                        f"High-gamma features lack broadband pair: {out}."
+                    )
                 if model == "corteg":
                     raw = []
                     features = []
