@@ -254,12 +254,15 @@ def _legacy_compatible(candidate: Path, config: dict) -> bool:
     if not hashes:
         return False
     for subject in hashes:
-        delays = (0, 40) if subject in old_config.get(
-            "delay_subjects", []
-        ) else (0,)
-        if not prepared_complete(
-            candidate / "prepared" / subject, delays
-        ):
+        prepared = candidate / "prepared" / subject
+        corteg = prepared / "corteg"
+        if not corteg.is_dir():
+            return False
+        delays = tuple(
+            int(path.name) for path in corteg.iterdir()
+            if path.is_dir() and path.name.isdecimal()
+        )
+        if not delays or not prepared_complete(prepared, delays):
             return False
     return True
 
