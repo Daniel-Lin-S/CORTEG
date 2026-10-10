@@ -1,7 +1,7 @@
 """Render aggregate CORTEG FingerFlex training-monitor figures.
 
 Input: a model-fit artifact root containing history.jsonl files.
-Output: one PNG per available monitor under reports/plots/ by default.
+Output: one PNG per monitor under plots/training_monitors/ by default.
 """
 from __future__ import annotations
 

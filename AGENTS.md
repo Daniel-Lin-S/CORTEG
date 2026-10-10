@@ -1,0 +1,38 @@
+# Agents.md
+
+Please use the conda environment specified in local configurations (e.g., `.vscode/settings.json`) for testing codes.
+
+## FIRST PRINCIPLE -- GRILL ME
+
+You should always grill me on ALL technical details and design choices rather than making guessworks or silently setting default values by yourself.
+
+Anti-example: I asked you to redesign the artifact figures, and you silently designed the content of one or several figures without checking details like x-y axis meanings, axis ticks, legends, plot timing with me.
+
+## Break-point restoration
+
+All experiments should store artifacts immediately after the results of one fit (the smallest unit of experiment, e.g., be one neural or non-neural fitting of a single random seed) are obtained to avoid losing results of already completed runs. However, failed, invalid, or interrupted run artifacts should be removed or quanrantined in the next invocation, starting a fresh experiment on that fit.
+
+If the failure in one experiment is not fatal (definitely affects the following fits), please report failure and continue trying following experiment rather than stopping the whole process.
+
+NEVER retrain a model on a data / fold / session that already have completion records under the same configurations. (changines in invocation parameters like number of GPU/CPUs used should NOT restart already completed experiments)
+
+## Evaluation and performance metrics
+
+NEVER interpret a raw mean performance difference as genuine improvement.
+
+Raw performance metric differences (effect sizes) and statistical tests should BOTH be reported.
+
+- perform test on paired train-test splits, NOT the random seed repeats
+- NEVER rely on rank-based tests
+
+Undefined correlation metric (e.g., flat signal) can be treated as 0.
+
+## Constraints
+
+NEVER directly remove or modify a previous completed run result -- `results.csv` and `test_summary.csv`. Appending to an incomplete result is allowed, but NOT modifying previous rows.
+
+NEVER reveal local paths (e.g., model checkpoints, dataset paths) in files tracked by GitHub. Store a separate local file for local paths. (with a template for new users)
+
+DO NOT overwhelm documentations with heavy technial details -- whch make them unreadable.
+
+DO NOT document about the development cycles. If an initial implementation A is changed to B, DONT document "B is implemented, rather than A". You should ONLY document the current version (B) of the code.

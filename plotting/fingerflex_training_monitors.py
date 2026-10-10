@@ -2,13 +2,12 @@
 
 Input: a model fit root with provenance selectors and runs/<fraction>/corteg/
 subject/seed*/history.jsonl. Output: one aggregate PNG per available monitor
-under reports/plots/training_monitors/.
+under plots/training_monitors/.
 """
 from __future__ import annotations
 
 import json
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -23,6 +22,7 @@ from plotting.training_monitors import (
     MonitorPlotStyle,
     aggregate_subject_runs,
     plot_monitor_panels,
+    robust_y_limits,
 )
 
 FINGER_LABELS = tuple(f"Finger {index}" for index in range(1, 6))
@@ -34,7 +34,9 @@ TRAIN_COLOR = "#0072B2"
 VALIDATION_COLOR = "#D55E00"
 TOTAL_GRADIENT_COLOR = "#009E73"
 DEFAULT_STYLE = MonitorPlotStyle()
-NONNEGATIVE_MONITORS = ("overall_mse", "finger_mse")
+PER_FINGER_MONITORS = (
+    "finger_pearson_r", "finger_mse", "finger_r2",
+)
 
 SeriesMap = dict[str, dict[float, dict[str, dict[str, list[np.ndarray]]]]]
 MonitorMetadata = tuple[str, str, str]
@@ -67,7 +69,7 @@ def _selectors(root: Path) -> tuple[list[str], list[float], list[int]]:
         subjects, fractions, seeds,
     )):
         raise ValueError("Campaign selectors contain duplicate values.")
-    return list(subjects), list(fractions), list(seeds)
+    return list(subjects), sorted(fractions, reverse=True), list(seeds)
 
 
 def _read_history(path: Path) -> list[dict]:
@@ -145,9 +147,9 @@ def _record_series(row: dict, path: Path) -> dict[str, dict[str, np.ndarray]]:
                 for label, value in zip(FINGER_LABELS, values)
             }
 
-    for source_name, monitor_name, ylabel in (
-        ("learning_rates", "learning_rates", "Learning rate"),
-        ("group_gradient_norm_mean", "group_gradient_norm", "Gradient norm"),
+    for source_name, monitor_name in (
+        ("learning_rates", "learning_rates"),
+        ("group_gradient_norm_mean", "group_gradient_norm"),
     ):
         values = row.get(source_name)
         if isinstance(values, dict) and values:
@@ -200,17 +202,19 @@ def _collect_histories(
     subjects: list[str],
     fractions: list[float],
     seeds: list[int],
-) -> tuple[SeriesMap, int, list[str]]:
-    """Load completed or partial histories and group available monitors."""
+) -> tuple[SeriesMap, int, dict[float, int]]:
+    """Load every selected history and record shared epoch cutoffs."""
     collected: SeriesMap = {}
     count = 0
-    missing = []
+    missing: list[Path] = []
+    cutoffs: dict[float, int] = {}
     for fraction in fractions:
         percent = fraction * 100
         if not float(percent).is_integer():
             raise ValueError(
                 f"Fraction has no integer percent run key: {fraction}."
             )
+        fraction_lengths = []
         for subject in subjects:
             for seed in seeds:
                 path = (
@@ -218,10 +222,13 @@ def _collect_histories(
                     / subject / f"seed{seed}" / "history.jsonl"
                 )
                 if not path.is_file():
-                    missing.append(str(path))
+                    missing.append(path)
                     continue
                 rows = _read_history(path)
-                series_by_monitor: dict[str, dict[str, list[float]]] = {}
+                fraction_lengths.append(len(rows))
+                series_by_monitor: dict[
+                    str, dict[str, list[float]],
+                ] = {}
                 for row in rows:
                     extracted = _record_series(row, path)
                     for monitor, curves in extracted.items():
@@ -231,14 +238,27 @@ def _collect_histories(
                             ).setdefault(curve, []).append(float(value[0]))
                 for monitor, curves in series_by_monitor.items():
                     for curve, values in curves.items():
+                        if len(values) != len(rows):
+                            raise ValueError(
+                                f"Expected {len(rows)} {monitor} values for "
+                                f"{curve} in {path}; got {len(values)}."
+                            )
                         _append_series(
                             collected, monitor, fraction, curve, subject,
                             np.asarray(values, dtype=float),
                         )
                 count += 1
+        if fraction_lengths:
+            cutoffs[fraction] = min(fraction_lengths)
+    if missing:
+        preview = ", ".join(str(path) for path in missing[:3])
+        raise FileNotFoundError(
+            f"Missing {len(missing)} selected training histories; "
+            f"examples: {preview}."
+        )
     if count == 0:
         raise ValueError(f"No training histories found under {root / 'runs'}.")
-    return collected, count, missing
+    return collected, count, cutoffs
 
 
 def _monitor_metadata() -> dict[str, MonitorMetadata]:
@@ -303,12 +323,31 @@ def _curve_style(monitor: str, label: str, index: int) -> tuple[str, str]:
     return FINGER_COLORS[index % len(FINGER_COLORS)], "-"
 
 
+def _curve_order(monitor: str, label: str) -> tuple[int, int]:
+    """Order labels by their meaning within each monitor."""
+    if monitor == "overall_mse":
+        order = {"Train MSE": 0, "Validation MSE": 1}
+        return order.get(label, 2), 0
+    if label.startswith("Finger "):
+        try:
+            return 0, int(label.removeprefix("Finger "))
+        except ValueError as error:
+            raise ValueError(f"Invalid finger curve label: {label}.") from error
+    group_order = {"Base": 0, "Adapter": 1}
+    if label in group_order:
+        return group_order[label], 0
+    return 0, 0
+
+
 def _panels_for_monitor(
     monitor: str,
     data: dict[float, dict[str, dict[str, list[np.ndarray]]]],
     fractions: list[float],
+    subjects: list[str],
+    seeds: list[int],
+    cutoffs: dict[float, int],
 ) -> tuple[MonitorPanel, ...]:
-    """Aggregate all curves and construct one panel per fraction."""
+    """Aggregate complete seed histories into fraction panels."""
     panels = []
     expected_curves = None
     for fraction in fractions:
@@ -317,7 +356,9 @@ def _panels_for_monitor(
             raise ValueError(
                 f"Monitor {monitor} has no curves at {fraction:.0%}."
             )
-        labels = tuple(sorted(fraction_data))
+        labels = tuple(sorted(fraction_data, key=lambda label: (
+            _curve_order(monitor, label), label,
+        )))
         if expected_curves is None:
             expected_curves = labels
         elif labels != expected_curves:
@@ -326,7 +367,32 @@ def _panels_for_monitor(
             )
         curves = []
         for index, label in enumerate(labels):
-            summary = aggregate_subject_runs(fraction_data[label])
+            subject_runs = fraction_data[label]
+            if set(subject_runs) != set(subjects):
+                raise ValueError(
+                    f"Monitor {monitor} curve {label} at {fraction:.0%} "
+                    "does not cover every selected subject."
+                )
+            if any(len(runs) != len(seeds) for runs in subject_runs.values()):
+                raise ValueError(
+                    f"Monitor {monitor} curve {label} at {fraction:.0%} "
+                    "does not include every selected seed for each subject."
+                )
+            cutoff = cutoffs[fraction]
+            truncated = {
+                subject: [run[:cutoff] for run in runs]
+                for subject, runs in subject_runs.items()
+            }
+            if any(
+                len(run) != cutoff
+                for runs in truncated.values()
+                for run in runs
+            ):
+                raise ValueError(
+                    f"Monitor {monitor} at {fraction:.0%} has a history "
+                    f"shorter than the shared {cutoff}-epoch limit."
+                )
+            summary = aggregate_subject_runs(truncated)
             color, linestyle = _curve_style(monitor, label, index)
             curves.append(MonitorCurve(
                 label, color, linestyle, summary,
@@ -347,7 +413,7 @@ def generate_training_monitor_plots(
     root : Path
         CORTEG fit root containing selectors and structured run histories.
     output_dir : Path, optional
-        Figure directory, default ``reports/plots/training_monitors``.
+        Figure directory, default ``plots/training_monitors``.
     style : MonitorPlotStyle, optional
         Reusable Matplotlib style settings, default ``DEFAULT_STYLE``.
 
@@ -358,12 +424,10 @@ def generate_training_monitor_plots(
     """
     root = root.expanduser().resolve()
     subjects, fractions, seeds = _selectors(root)
-    collected, history_count, missing = _collect_histories(
+    collected, history_count, cutoffs = _collect_histories(
         root, subjects, fractions, seeds,
     )
-    output = output_dir or (
-        root / "reports" / "plots" / "training_monitors"
-    )
+    output = output_dir or root / "plots" / "training_monitors"
     output.mkdir(parents=True, exist_ok=True)
     metadata = _monitor_metadata()
     paths = []
@@ -372,17 +436,16 @@ def generate_training_monitor_plots(
             raise ValueError(f"No plotting metadata for monitor {monitor}.")
         title, ylabel, filename = metadata[monitor]
         panels = _panels_for_monitor(
-            monitor, fraction_data, fractions,
+            monitor, fraction_data, fractions, subjects, seeds, cutoffs,
         )
-        nonnegative = monitor in NONNEGATIVE_MONITORS
+        limits = (
+            robust_y_limits(panels)
+            if monitor in PER_FINGER_MONITORS else None
+        )
         paths.append(plot_monitor_panels(
             title, ylabel, panels, output / filename, style,
-            yscale="symlog" if nonnegative else "linear",
-            lower_bound=0.0 if nonnegative else None,
+            subtitle=f"N = {len(subjects)} subjects",
+            y_limits=limits,
         ))
-    if missing:
-        print(
-            f"Skipped {len(missing)} missing histories; loaded "
-            f"{history_count} histories.", file=sys.stderr,
-        )
+    print(f"Loaded {history_count} training histories.", file=sys.stderr)
     return paths
