@@ -1,0 +1,81 @@
+{
+  "name": "stanford_finger_small_hilo_0ms",
+  "raw_root": "/data/neural_data/datasets/fingerflex_stanford-unknown-b1784a19-af7c-4094-bb05-1bb1aca8c59d/data",
+  "artifact_base": "/data/lyh/CORTEG/fingerflex_stanford",
+  "checkpoint": "/data/lyh/model_weights/ST-EEGFormer-small/checkpoint-300.pth",
+  "subjects": [
+    "bp",
+    "cc",
+    "ht",
+    "jc",
+    "jp",
+    "mv",
+    "wc",
+    "wm",
+    "zt"
+  ],
+  "delay_subjects": [
+    "bp",
+    "jp",
+    "mv"
+  ],
+  "fractions": [
+    1.0,
+    0.25,
+    0.1
+  ],
+  "seeds": [
+    0,
+    1,
+    2
+  ],
+  "preprocessing": {
+    "ecog_scale": 0.0298,
+    "split": {
+      "duration_cutoff_seconds": 600,
+      "at_or_above_cutoff": {
+        "train_seconds": 400
+      },
+      "below_cutoff": {
+        "train_parts": 2,
+        "total_parts": 3
+      }
+    },
+    "notch_bands_hz": [
+      [
+        59.5,
+        60.5
+      ],
+      [
+        119.5,
+        120.5
+      ],
+      [
+        179.5,
+        180.5
+      ]
+    ],
+    "notch_filter_order": 3,
+    "bad_channel": {
+      "variance_normalization": 0,
+      "low_variance_multiplier": 0.2,
+      "high_variance_multiplier": 5.0
+    }
+  },
+  "training": {
+    "epochs": 200,
+    "patience": 30,
+    "batch_size": 128,
+    "base_lr": 0.001,
+    "adapter_lr_high": 0.01,
+    "adapter_lr_low": 0.002,
+    "weight_decay": 0.005,
+    "lora_last_n": 4,
+    "lora_rank": 4,
+    "lora_alpha": 16,
+    "lora_dropout": 0.2,
+    "warmup_epochs": 10,
+    "min_lr": 1e-05
+  },
+  "checkpoint_sha256": "98d2848abdaea7a143d399c07f67f8782e07dd66e7c309ddb058c7158a8a8b02"
+}
