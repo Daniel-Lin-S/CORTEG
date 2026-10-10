@@ -1,25 +1,69 @@
 """Compare completed model-specific Stanford FingerFlex fit campaigns.
 
-Input is a comparison manifest with four model fit roots. Output is
-reports/summary.json plus subject, aggregate, and six-pair comparison PNGs.
-The comparison artifact stores references and reports, not model fits.
+Input is a portable comparison JSON and model-specific fit artifacts.
+Output is a separate comparison root with index.json, reports/summary.json,
+and plots/. Fit artifacts and predictions remain in their original roots.
 """
 from __future__ import annotations
 
+import argparse
 import hashlib
 import itertools
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
+from scipy.stats import wilcoxon
 
-from data.fingerflex_cache import preparation_id
+REPO = Path(__file__).resolve().parents[1]
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from data.fingerflex_cache import preparation_id, resolve_campaign
 from data.fingerflex_campaign import digest_array
-from scripts.fingerflex_campaign import _holm, _paired_test
+from scripts.fingerflex_campaign import _holm
 
 METRICS = ("pearson_r", "mse", "r2")
-MODELS = ("corteg", "hilo", "pls", "cnn_gru")
-COMPARISON_VERSION = "paired_subject_signflip_v1"
+SUPPORTED_MODELS = ("corteg", "hilo", "pls", "cnn_gru")
+COMPARISON_VERSION = "paired_subject_wilcoxon_v1"
+EXPECTED_RULES = {
+    "metrics": list(METRICS),
+    "paired_unit": "subject",
+    "test": "wilcoxon_signed_rank",
+    "holm_family": "metrics_within_pair_and_fraction",
+}
+
+
+def _paired_wilcoxon(difference: np.ndarray) -> float:
+    """Return a two-sided signed-rank p-value across paired subjects.
+
+    Parameters
+    ----------
+    difference : ndarray, shape (subjects,)
+        Seed-averaged first-model minus second-model metric values.
+
+    Returns
+    -------
+    float
+        Two-sided Wilcoxon p-value.
+    """
+    if difference.ndim != 1 or len(difference) < 2 or not np.isfinite(
+        difference
+    ).all():
+        raise ValueError(
+            "Wilcoxon needs at least two finite subject differences."
+        )
+    if np.all(difference == 0):
+        return 1.0
+    result = wilcoxon(
+        difference, alternative="two-sided", zero_method="wilcox",
+        method="auto",
+    )
+    pvalue = float(result.pvalue)
+    if not np.isfinite(pvalue):
+        raise ValueError("Wilcoxon returned a nonfinite p-value.")
+    return pvalue
 
 
 def _identity(semantics: dict) -> str:
@@ -36,6 +80,11 @@ def ensure_comparison(
     roots: dict[str, Path],
 ) -> Path:
     """Create or validate a report-only comparison campaign."""
+    selected = tuple(study.get("models", roots))
+    if tuple(roots) != selected:
+        raise ValueError(
+            "Comparison models must match the ordered fit-root keys."
+        )
     fit_ids = {
         model: json.loads((root / "index.json").read_text())["semantic_id"]
         for model, root in roots.items()
@@ -171,15 +220,28 @@ def _check_alignment(results: dict[str, list[dict]]) -> None:
 
 
 def report(root: Path) -> dict:
-    """Aggregate available fits and test six complete paired comparisons."""
+    """Aggregate fits and test every complete paired model comparison."""
     index = json.loads((root / "index.json").read_text())
+    rules = index.get("semantics", {}).get("rules", {})
+    if rules and rules != EXPECTED_RULES:
+        raise ValueError(
+            "Comparison rules differ from the Wilcoxon report policy."
+        )
     fit_roots = {
         model: Path(path) for model, path in index["fit_roots"].items()
     }
+    models = tuple(fit_roots)
+    if len(models) < 2 or set(models) - set(SUPPORTED_MODELS):
+        raise ValueError(
+            f"Expected at least two supported models, got {models}."
+        )
+    if set(index["semantics"]["fit_ids"]) != set(models):
+        raise ValueError("Comparison fit identities disagree with fit roots.")
     summary = {
         "fit_ids": index["semantics"]["fit_ids"],
         "comparison_id": index["semantic_id"],
         "metrics": list(METRICS),
+        "models": list(models),
         "fractions": {},
     }
     all_complete = True
@@ -189,7 +251,7 @@ def report(root: Path) -> dict:
         for subject in index["subjects"]:
             groups: dict[str, list[dict]] = {}
             entries = {}
-            for model in MODELS:
+            for model in models:
                 seeds = [None] if model == "pls" else index["seeds"]
                 found = [
                     _read_fit(
@@ -210,7 +272,7 @@ def report(root: Path) -> dict:
                 _check_alignment(groups)
             subject_rows[subject] = entries
         comparisons = {}
-        for first, second in itertools.combinations(MODELS, 2):
+        for first, second in itertools.combinations(models, 2):
             complete = all(
                 subject_rows[subject].get(first, {}).get("fits")
                 == (1 if first == "pls" else len(index["seeds"]))
@@ -230,7 +292,7 @@ def report(root: Path) -> dict:
                 ]) for metric in METRICS
             }
             raw = {
-                metric: _paired_test(values)
+                metric: _paired_wilcoxon(values)
                 for metric, values in difference.items()
             }
             corrected = _holm(raw)
@@ -256,3 +318,78 @@ def report(root: Path) -> dict:
         from plotting.fingerflex_comparison import generate_plots
         generate_plots(root)
     return summary
+
+
+def load_comparison_study(path: Path) -> tuple[dict, dict]:
+    """Resolve portable comparison selectors and local artifact settings."""
+    study = json.loads(path.read_text())
+    models = study["models"]
+    if len(models) < 2 or len(set(models)) != len(models) or (
+        set(models) - set(SUPPORTED_MODELS)
+    ):
+        raise ValueError(
+            f"Comparison requires unique supported models: {models}."
+        )
+    if set(study["fit_ids"]) != set(models):
+        raise ValueError("Fit IDs must name exactly the selected models.")
+    if study["comparison"] != EXPECTED_RULES:
+        raise ValueError("Comparison rules differ from the implemented test.")
+    campaign = Path(study["source_campaign"])
+    if campaign.is_absolute():
+        raise ValueError("Source campaign must be a repository path.")
+    base = resolve_campaign(REPO / campaign)
+    if base["delay_ms"] != 0:
+        raise ValueError("This comparison requires zero-delay fits.")
+    for key in ("subjects", "fractions", "seeds"):
+        values = study[key]
+        if not values or len(set(values)) != len(values):
+            raise ValueError(f"Invalid {key} selectors: {values}.")
+        if not set(values).issubset(base[key]):
+            raise ValueError(f"{key} selectors exceed the source campaign.")
+    return study, base
+
+
+def find_fit_roots(study: dict, base: dict) -> dict[str, Path]:
+    """Resolve model fit roots by portable semantic IDs."""
+    parent = Path(base["artifact_base"]) / "fits"
+    expected_preprocessing = preparation_id(base)
+    roots = {}
+    for model in study["models"]:
+        matches = []
+        for index_path in parent.glob("*/index.json"):
+            index = json.loads(index_path.read_text())
+            if index.get("model") != model or (
+                index.get("semantic_id") != study["fit_ids"][model]
+            ):
+                continue
+            if index.get("preprocessing_id") != expected_preprocessing:
+                raise ValueError(
+                    f"Fit preprocessing identity differs: {index_path}."
+                )
+            if index.get("semantics", {}).get("delay_ms") != 0:
+                raise ValueError(f"Expected zero-delay fit: {index_path}.")
+            matches.append(index_path.parent)
+        if len(matches) != 1:
+            raise ValueError(
+                f"Expected one fit root for {model} with ID "
+                f"{study['fit_ids'][model]}; found {len(matches)}."
+            )
+        roots[model] = matches[0]
+    return roots
+
+
+def main() -> None:
+    """Create a model-subset comparison and report completed fits."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=Path, required=True)
+    args = parser.parse_args()
+    study, base = load_comparison_study(args.config)
+    roots = find_fit_roots(study, base)
+    comparison = ensure_comparison(study, base, roots)
+    summary = report(comparison)
+    print(comparison.resolve())
+    print(f"Complete: {summary['complete']}")
+
+
+if __name__ == "__main__":
+    main()

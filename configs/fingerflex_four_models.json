@@ -25,7 +25,7 @@
   "comparison": {
     "metrics": ["pearson_r", "mse", "r2"],
     "paired_unit": "subject",
-    "test": "exact_sign_flip",
+    "test": "wilcoxon_signed_rank",
     "holm_family": "metrics_within_pair_and_fraction"
   }
 }
