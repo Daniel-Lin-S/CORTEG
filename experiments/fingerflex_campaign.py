@@ -214,10 +214,12 @@ def parameter_groups(
 ) -> tuple[list[dict], dict]:
     """Assign adapter-only LR boost while keeping LoRA at base LR."""
     base = config["base_lr"]
-    adapter_lr = (
-        config["adapter_lr_low"] if fraction == 0.1
-        else config["adapter_lr_high"]
-    )
+    adapter_lr = base
+    if model_name == "corteg":
+        adapter_lr = (
+            config["adapter_lr_low"] if fraction == 0.1
+            else config["adapter_lr_high"]
+        )
     grouped: dict[str, list[nn.Parameter]] = {}
     names: dict[str, list[str]] = {}
     for name, param in model.named_parameters():

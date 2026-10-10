@@ -14,7 +14,9 @@ from unittest.mock import patch
 import numpy as np
 import torch
 
-from experiments.fingerflex_campaign import _load_arrays
+from experiments.fingerflex_campaign import (
+    _load_arrays, parameter_groups,
+)
 from models.temporal_spatial_cnn_gru import TemporalSpatialCNNGRU
 from data.fingerflex_cnn_gru_hpo_adapter import (
     DEFAULT_ARCHITECTURE, architecture_grid, architecture_key,
@@ -67,6 +69,15 @@ class CnnGruHpoTests(unittest.TestCase):
             torch.testing.assert_close(
                 value, explicit.state_dict()[key], rtol=0, atol=0,
             )
+
+    def test_cnn_groups_do_not_require_adapter_rate(self) -> None:
+        """CNN-GRU uses its base rate without CORTEG-only settings."""
+        model = torch.nn.Linear(2, 1)
+        groups, names = parameter_groups(
+            model, "cnn_gru", 1.0, {"base_lr": 0.001},
+        )
+        self.assertEqual([group["lr"] for group in groups], [0.001])
+        self.assertEqual(set(names), {"base"})
 
     def test_screening_never_reads_test_files(self) -> None:
         """Validation preparation works without any test arrays."""

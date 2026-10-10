@@ -52,8 +52,11 @@ PORTABLE_FIT_SOURCE_SHA256 = (
 PRE_HPO_EXTENDED_FIT_SOURCE_SHA256 = (
     "f70e65246df70b10c423f57f65e003a9a53a12857ca90aa448bca42786433afa"
 )
-EXTENDED_FIT_SOURCE_SHA256 = (
+PRE_LR_FIX_FIT_SOURCE_SHA256 = (
     "c09b2db3f990411fcb8493c2471c0af1d587fa661dd230a73f5cfb9a599a3104"
+)
+EXTENDED_FIT_SOURCE_SHA256 = (
+    "34c4ff5292351ae567921d6bc2fd913845d5be93850cd0fad82e19df827c42e3"
 )
 
 
@@ -155,6 +158,7 @@ def _legacy_training_matches(candidate: Path, config: dict) -> bool:
         and current_fit_hash in (
             PORTABLE_FIT_SOURCE_SHA256,
             PRE_HPO_EXTENDED_FIT_SOURCE_SHA256,
+            PRE_LR_FIX_FIT_SOURCE_SHA256,
             EXTENDED_FIT_SOURCE_SHA256
         )
     )
