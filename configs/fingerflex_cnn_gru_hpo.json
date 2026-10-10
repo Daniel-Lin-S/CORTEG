@@ -1,0 +1,64 @@
+{
+  "adapter": "data.fingerflex_cnn_gru_hpo_adapter",
+  "name": "stanford_finger_cnn_gru_grid_0ms",
+  "source_fits": "configs/fingerflex_four_models.json",
+  "reference_comparison": "configs/fingerflex_three_model_comparison.json",
+  "subjects": [
+    "bp",
+    "cc",
+    "ht",
+    "jc",
+    "jp",
+    "mv",
+    "wc",
+    "wm",
+    "zt"
+  ],
+  "grid": {
+    "n_convolution_layers": [
+      2,
+      3,
+      4
+    ],
+    "conv_stride": [
+      2,
+      3
+    ],
+    "drop_out": [
+      0.0,
+      0.1,
+      0.3,
+      0.5
+    ],
+    "exclude": [
+      {
+        "n_convolution_layers": 4,
+        "conv_stride": 3
+      }
+    ]
+  },
+  "selection": {
+    "fraction": 1.0,
+    "seed": 0,
+    "metric": "mean_finger_pearson_r",
+    "aggregation": "equal_subject_mean",
+    "tie_break": "ascending_architecture"
+  },
+  "final": {
+    "fractions": [
+      1.0,
+      0.25,
+      0.1
+    ],
+    "seeds": [
+      0,
+      1,
+      2
+    ]
+  },
+  "comparison_name": "stanford_finger_cnn_gru_hilo_corteg_hpo_0ms",
+  "runtime": {
+    "gpu_workers": 4,
+    "minimum_gpu_free_mib": 4096
+  }
+}
