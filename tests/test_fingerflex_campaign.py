@@ -1,10 +1,11 @@
 """Synthetic checks for Stanford preparation, metrics, scheduling, and resume.
 
-Input: deterministic in-memory arrays and temporary status folders.
+Input: deterministic arrays, temporary local settings and status folders.
 Output: assertions only; no raw dataset or GPU access.
 """
 from __future__ import annotations
 
+import atexit
 import json
 import queue
 import tempfile
@@ -34,6 +35,8 @@ from experiments.fingerflex_campaign import (
     split_fit_rows,
 )
 from scripts.fingerflex_campaign import (
+    LEGACY_FIT_SOURCE_SHA256,
+    PORTABLE_FIT_SOURCE_SHA256,
     _holm,
     _paired_test,
     _worker,
@@ -47,18 +50,58 @@ from scripts.fingerflex_campaign import (
     source_revision,
 )
 
+REPO = Path(__file__).resolve().parents[1]
+LOCAL_TEST_DIR = tempfile.TemporaryDirectory()
+atexit.register(LOCAL_TEST_DIR.cleanup)
+LOCAL_TEST_ROOT = Path(LOCAL_TEST_DIR.name)
+(LOCAL_TEST_ROOT / "raw").mkdir()
+(LOCAL_TEST_ROOT / "checkpoint.pth").write_bytes(b"checkpoint fixture")
+LOCAL_TEST_CONFIG = LOCAL_TEST_ROOT / "fingerflex_local.json"
+LOCAL_TEST_CONFIG.write_text(json.dumps({
+    "raw_root": str(LOCAL_TEST_ROOT / "raw"),
+    "artifact_base": str(LOCAL_TEST_ROOT / "artifacts"),
+    "checkpoint": str(LOCAL_TEST_ROOT / "checkpoint.pth"),
+    "hilo_source": str(REPO / "experiments" / "fingerflex_campaign.py"),
+    "tmux_executable": "git",
+}))
 CONFIG = resolve_campaign(
-    Path(__file__).resolve().parents[1]
-    / "configs" / "fingerflex_campaign.json"
+    REPO / "configs" / "fingerflex_campaign.json",
+    LOCAL_TEST_CONFIG,
 )
 PROBE = resolve_campaign(
-    Path(__file__).resolve().parents[1]
-    / "configs" / "fingerflex_delay40ms.json"
+    REPO / "configs" / "fingerflex_delay40ms.json",
+    LOCAL_TEST_CONFIG,
 )
 
 
 class FingerflexCampaignTests(unittest.TestCase):
     """Check invariants that can fail without full model training."""
+
+    def test_local_paths_and_checkpoint_hash_are_resolved(self) -> None:
+        """Portable configs omit paths and runtime hashes checkpoint bytes."""
+        self.assertEqual(
+            CONFIG["checkpoint_sha256"],
+            sha256_file(Path(CONFIG["checkpoint"])),
+        )
+        self.assertEqual(
+            PORTABLE_FIT_SOURCE_SHA256,
+            sha256_file(REPO / "experiments" / "fingerflex_campaign.py"),
+        )
+        portable = json.loads(
+            (REPO / "configs" / "fingerflex_campaign.json").read_text()
+        )
+        for key in (
+            "raw_root", "artifact_base", "checkpoint",
+            "hilo_source", "tmux_executable", "checkpoint_sha256",
+        ):
+            self.assertNotIn(key, portable)
+        with self.assertRaisesRegex(
+            FileNotFoundError, "Local settings file is missing"
+        ):
+            resolve_campaign(
+                REPO / "configs" / "fingerflex_campaign.json",
+                LOCAL_TEST_ROOT / "absent.json",
+            )
 
     def test_train_only_channel_screen(self) -> None:
         """Test-set outliers cannot change retained channel selection."""
@@ -176,9 +219,8 @@ class FingerflexCampaignTests(unittest.TestCase):
                     "data/fingerflex_campaign.py": (
                         LEGACY_PREPARATION_SHA256
                     ),
-                    "experiments/fingerflex_campaign.py": sha256_file(
-                        Path(__file__).resolve().parents[1]
-                        / "experiments" / "fingerflex_campaign.py"
+                    "experiments/fingerflex_campaign.py": (
+                        LEGACY_FIT_SOURCE_SHA256
                     ),
                 }
             }))
@@ -188,7 +230,7 @@ class FingerflexCampaignTests(unittest.TestCase):
                     Path(__file__).resolve().parents[1]
                 ),
                 "hilo_revision": source_revision(
-                    Path("/home/lyh/codes/HiLoFuseNet")
+                    Path(CONFIG["hilo_source"]).parent
                 ),
             }))
             prepared = legacy / "prepared" / "bp"

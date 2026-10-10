@@ -1,8 +1,8 @@
 """Resolve Stanford preprocessing and share prepared samples across runs.
 
-Input: ``configs/fingerflex_campaign.json`` referencing
-``configs/stanford_preprocessing.json``; registered raw MATLAB files; and,
-when available, a completed legacy campaign's ``prepared/`` directory.
+Input: a tracked campaign JSON, the ignored ``fingerflex_local.json``
+with machine paths, the referenced preprocessing JSON, registered MATLAB
+files, and optional completed legacy ``prepared/`` arrays.
 Output: ``<artifact_base>/preprocessing/<preprocessing-id>/index.json`` and
 ``subjects/<subject>/`` feature arrays. Legacy arrays are linked per subject,
 not copied. A training artifact may link its ``prepared/`` entry to this
@@ -13,6 +13,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import shutil
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -38,6 +39,11 @@ REQUIRED_PREPROCESSING_KEYS = (
     "bad_channel",
 )
 SUPPORTED_FILTER = ("but", "onepass", "all", "avg")
+LOCAL_KEYS = (
+    "raw_root", "artifact_base", "checkpoint",
+    "hilo_source", "tmux_executable",
+)
+LOCAL_PATH_KEYS = LOCAL_KEYS[:4]
 ARRAYS = {
     "common": ("metadata.json", "train_y.npy", "test_y.npy",
                "train_indices.npy", "test_indices.npy", "xyz_mm.npy"),
@@ -66,20 +72,100 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def resolve_campaign(path: Path) -> dict:
-    """Combine training settings with resolved preprocessing settings.
+def load_local_settings(path: Path) -> dict:
+    """Validate machine-specific paths from one ignored JSON file.
 
     Parameters
     ----------
     path : Path
-        JSON campaign configuration.
+        Local JSON file with raw, artifact, checkpoint, HiLo, and tmux paths.
 
     Returns
     -------
     dict
-        Full configuration with ``preprocessing`` resolved from its own file.
+        Absolute input paths and an available tmux executable.
     """
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Local settings file is missing: {path}. "
+            "Copy fingerflex_local.example.json and fill its paths."
+        )
+    local = json.loads(path.read_text())
+    if set(local) != set(LOCAL_KEYS):
+        raise ValueError(
+            f"Expected local keys {LOCAL_KEYS}, got {sorted(local)}."
+        )
+    for key in LOCAL_PATH_KEYS:
+        value = local[key]
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"Local {key} must be a nonempty path.")
+        location = Path(value).expanduser()
+        if not location.is_absolute():
+            raise ValueError(f"Local {key} must be absolute: {value}.")
+        if key == "raw_root" and not location.is_dir():
+            raise FileNotFoundError(
+                f"Local raw_root is not a directory: {location}."
+            )
+        if key in ("checkpoint", "hilo_source") and not (
+            location.is_file()
+        ):
+            raise FileNotFoundError(
+                f"Local {key} is not a file: {location}."
+            )
+        if key == "artifact_base" and (
+            location.exists() and not location.is_dir()
+        ):
+            raise ValueError(
+                f"Local artifact_base is not a directory: {location}."
+            )
+        local[key] = str(location)
+    executable = local["tmux_executable"]
+    if not isinstance(executable, str) or not shutil.which(executable):
+        raise FileNotFoundError(
+            f"Local tmux_executable is unavailable: {executable}."
+        )
+    return local
+
+
+def resolve_campaign(
+    path: Path,
+    local_path: Path | None = None,
+) -> dict:
+    """Resolve portable campaign settings and local input paths.
+
+    Parameters
+    ----------
+    path : Path
+        Tracked campaign JSON file.
+    local_path : Path, optional
+        Ignored local JSON file, default
+        ``<campaign directory>/fingerflex_local.json``.
+
+    Returns
+    -------
+    dict
+        Fully resolved settings with checkpoint hash computed from bytes.
+    """
+    path = path.resolve()
     config = json.loads(path.read_text())
+    forbidden = set(LOCAL_KEYS) | {"checkpoint_sha256"}
+    misplaced = forbidden.intersection(config)
+    if misplaced:
+        raise ValueError(
+            f"Move machine paths and checkpoint hashes out of {path}: "
+            f"{sorted(misplaced)}."
+        )
+    local_path = (
+        local_path if local_path is not None
+        else path.parent / "fingerflex_local.json"
+    )
+    if not local_path.is_absolute():
+        local_path = local_path.resolve()
+    local = load_local_settings(local_path)
+    config.update(local)
+    config["checkpoint_sha256"] = sha256_file(
+        Path(config["checkpoint"])
+    )
     delay = config["delay_ms"]
     if delay not in (0, MAX_DELAY):
         raise ValueError(

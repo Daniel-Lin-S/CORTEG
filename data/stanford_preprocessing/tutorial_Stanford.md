@@ -5,7 +5,7 @@ This document provides a detailed tutorial for preprocessing the Stanford Finger
 ## 1. Dataset Acquisition
 The Stanford FingerFlex dataset consists of ECoG recordings from 9 subjects while they performed finger flexion tasks.
 * **Download Link:** [Stanford-FingerFlex: zk881ps0522](https://searchworks.stanford.edu/view/zk881ps0522)
-* **Storage:** Keep the raw subject folders in a directory of your choice and set `CORTEG_STANFORD_RAW_ROOT` to that directory, for example `/data/lyh/neural_data/ecog/fingerflex/data`. The preprocessing script reads that directory without modifying it.
+* **Storage:** Keep the raw subject folders in a directory of your choice and set `CORTEG_STANFORD_RAW_ROOT` to that directory. The preprocessing script reads that directory without modifying it.
 
 ## 2. Environment Setup
 The pipeline requires two distinct environments:

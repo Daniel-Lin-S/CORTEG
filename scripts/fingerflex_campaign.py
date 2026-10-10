@@ -1,6 +1,7 @@
 """Launch and report the resumable Stanford FingerFlex GPU campaign.
 
-Input: ``configs/fingerflex_campaign.json`` and registered raw patient files.
+Input: a tracked campaign JSON, ignored ``configs/fingerflex_local.json``,
+registered raw patient files, and a local model checkpoint.
 Output: one semantic-hash artifact with ``index.json`` and ``provenance/``,
 ``prepared/``, ``runs/``, ``status/``, and ``reports/`` directories. Each
 worker writes one subject-level fit under ``runs/``; status JSONL records job
@@ -32,6 +33,7 @@ if str(REPO) not in sys.path:
 from data.fingerflex_cache import (
     cache_root,
     ensure_cache,
+    load_local_settings,
     preparation_id,
     prepare_cached_subject,
     resolve_campaign,
@@ -41,6 +43,12 @@ CONFIG = REPO / "configs" / "fingerflex_campaign.json"
 MIN_FREE_MIB = 16384
 GPU_COUNT = 4
 METRICS = ("pearson_r", "mse", "r2")
+LEGACY_FIT_SOURCE_SHA256 = (
+    "e6a7e8e8da575f22f3c0991422ad23b61936d5eb3663448a6dfdfe78e4380f75"
+)
+PORTABLE_FIT_SOURCE_SHA256 = (
+    "3c5ad2c3c0bdfbe3325af8a9afaf4ffb6225acec6f0808284fdbc9863ee7f23c"
+)
 
 
 def source_revision(path: Path) -> str:
@@ -60,10 +68,7 @@ def semantic_identity(config: dict) -> tuple[str, dict]:
         REPO / "experiments" / "fingerflex_campaign.py",
         REPO / "experiments" / "run_regression_hilo_clean.py",
         REPO / "train" / "lr_schedule.py",
-        Path(
-            "/home/lyh/codes/HiLoFuseNet/finger_regression/models/"
-            "nn_regressors.py"
-        ),
+        Path(config["hilo_source"]),
     ]
     source_paths.extend(sorted((REPO / "models" / "steegformer").glob(
         "*.py"
@@ -133,13 +138,21 @@ def _legacy_training_matches(candidate: Path, config: dict) -> bool:
     source_hashes = json.loads(paths[1].read_text()).get(
         "campaign_source_sha256", {}
     )
-    if source_hashes.get("experiments/fingerflex_campaign.py") != (
-        sha256_file(REPO / "experiments" / "fingerflex_campaign.py")
-    ):
+    old_fit_hash = source_hashes.get(
+        "experiments/fingerflex_campaign.py"
+    )
+    current_fit_hash = sha256_file(
+        REPO / "experiments" / "fingerflex_campaign.py"
+    )
+    compatible_path_refactor = (
+        old_fit_hash == LEGACY_FIT_SOURCE_SHA256
+        and current_fit_hash == PORTABLE_FIT_SOURCE_SHA256
+    )
+    if old_fit_hash != current_fit_hash and not compatible_path_refactor:
         return False
     inputs = json.loads(paths[2].read_text())
     if inputs.get("hilo_revision") != source_revision(
-        Path("/home/lyh/codes/HiLoFuseNet")
+        Path(config["hilo_source"]).parent
     ):
         return False
     old_revision = inputs.get("corteg_revision")
@@ -282,7 +295,7 @@ def ensure_artifact(config: dict) -> Path:
         "raw_sha256": cache_index["raw_sha256"],
         "corteg_revision": source_revision(REPO),
         "hilo_revision": source_revision(
-            Path("/home/lyh/codes/HiLoFuseNet")
+            Path(config["hilo_source"]).parent
         ),
     }
     (provenance / "input_hashes.json").write_text(
@@ -300,8 +313,13 @@ def _refresh_input_hashes(root: Path, config: dict) -> None:
     path.write_text(json.dumps(inputs, indent=2) + "\n")
 
 
-def _artifact_config(root: Path) -> dict:
-    """Load the resolved settings saved with one training artifact."""
+def _artifact_config(
+    root: Path,
+    *,
+    require_local: bool = False,
+) -> dict:
+    """Load saved settings, adding local paths for old fit artifacts."""
+
     path = root / "provenance" / "resolved_config.json"
     if not path.is_file():
         raise FileNotFoundError(f"Run configuration is missing: {path}.")
@@ -311,6 +329,14 @@ def _artifact_config(root: Path) -> dict:
         config.update(json.loads(selections.read_text()))
     config.setdefault("delay_ms", 0)
     config.setdefault("models", ["corteg", "hilo"])
+    if require_local and (
+        "hilo_source" not in config or "tmux_executable" not in config
+    ):
+        local = load_local_settings(
+            REPO / "configs" / "fingerflex_local.json"
+        )
+        for key in ("hilo_source", "tmux_executable"):
+            config.setdefault(key, local[key])
     return config
 
 
@@ -587,6 +613,7 @@ def main() -> None:
     )
     parser.add_argument("--root", type=Path)
     parser.add_argument("--config", type=Path, default=CONFIG)
+    parser.add_argument("--local-config", type=Path)
     parser.add_argument("--model", choices=("corteg", "hilo"))
     parser.add_argument("--subject")
     parser.add_argument("--fraction", type=float)
@@ -594,7 +621,7 @@ def main() -> None:
     parser.add_argument("--delay", type=int, default=0)
     args = parser.parse_args()
     if args.command == "prepare":
-        config = resolve_campaign(args.config)
+        config = resolve_campaign(args.config, args.local_config)
         subjects = ensure_cache(config)
         for subject in config["subjects"]:
             reused = prepare_cached_subject(
@@ -605,7 +632,7 @@ def main() -> None:
                 f"{subjects / subject}", flush=True,
             )
     elif args.command == "launch":
-        config = resolve_campaign(args.config)
+        config = resolve_campaign(args.config, args.local_config)
         root = ensure_artifact(config)
         print(root, flush=True)
         pending = sum(
@@ -627,14 +654,17 @@ def main() -> None:
             root / "status" / "coordinator.log"
         )) + " 2>&1"
         subprocess.run(
-            ["/home/lyh/plugins/tmux/bin/tmux", "new-session",
+            [config["tmux_executable"], "new-session",
              "-d", "-s", session, command], check=True,
         )
         print(f"tmux session: {session}", flush=True)
     else:
         if args.root is None:
             raise ValueError("--root is required after launch.")
-        config = _artifact_config(args.root)
+        config = _artifact_config(
+            args.root,
+            require_local=args.command in ("coordinate", "fit"),
+        )
         if args.command == "coordinate":
             coordinate(args.root, config)
             report(args.root, _artifact_config(args.root))

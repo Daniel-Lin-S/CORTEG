@@ -1,6 +1,7 @@
 """Fit one Stanford FingerFlex model on one subject, fraction, and seed.
 
-Input: campaign config/provenance and prepared NumPy feature/target arrays.
+Input: resolved campaign provenance with checkpoint and HiLo source paths,
+plus prepared NumPy feature and target arrays.
 Output: ``runs/<fraction>/<model>/<subject>/seed<seed>/`` with epoch
 history JSONL, normalization statistics NPZ, validation-selected checkpoint,
 test predictions NPZ, and result JSON. Test evaluation occurs only after
@@ -29,9 +30,6 @@ from train.lr_schedule import WarmupCosineLR
 
 MIN_STD = 1e-3
 CLIP_Z = 5.0
-HILO_SOURCE = Path(
-    "/home/lyh/codes/HiLoFuseNet/finger_regression/models/nn_regressors.py"
-)
 FINGER_COUNT = 5
 
 
@@ -140,13 +138,13 @@ def metric_values(truth: np.ndarray, pred: np.ndarray) -> dict:
     }
 
 
-def _hilo_model(channels: int) -> nn.Module:
-    """Import the pinned local upstream HiLoFuseNet architecture."""
+def _hilo_model(channels: int, source: Path) -> nn.Module:
+    """Import the configured upstream HiLoFuseNet architecture."""
     spec = importlib.util.spec_from_file_location(
-        "fingerflex_hilo_upstream", HILO_SOURCE,
+        "fingerflex_hilo_upstream", source,
     )
     if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot import HiLoFuseNet from {HILO_SOURCE}.")
+        raise ImportError(f"Cannot import HiLoFuseNet from {source}.")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module.HiLoFuseNet(
@@ -399,7 +397,9 @@ def fit_job(
             arrays["x"][0].shape[1], xyz_np,
             Path(config["checkpoint"]), training,
         ) if model_name == "corteg"
-        else _hilo_model(arrays["x"][0].shape[1])
+        else _hilo_model(
+            arrays["x"][0].shape[1], Path(config["hilo_source"])
+        )
     ).to(device)
     groups, names = parameter_groups(model, model_name, fraction, training)
     initial = {name: param.detach().cpu().clone()

@@ -1,12 +1,15 @@
 # Regression experiments: identity, seeds, and paired tests
 
-`/home/lyh/codes/CORTEG/scripts/multiseed_regression.py` coordinates
+`scripts/multiseed_regression.py` coordinates
 per-subject regression jobs and evaluates saved results. It supports any task
 with per-subject result JSON, including Stanford finger trajectories and
 Ghent audio envelopes when their result files exist. The private Ghent data
 and preparation code are unavailable in this release.
 
 ## Named semantic identity
+
+Run the example from the repository root and save its specification
+there so relative paths resolve correctly.
 
 The JSON specification needs a readable top-level `name`, `semantic_config`,
 and nonempty `tasks`. Each task needs `name`, `protocol_id`, `dataset`,
@@ -17,7 +20,7 @@ recursively, and unknown override keys are errors. A nested
 `{ "$json": "/absolute/path/to/config.json" }` loads another JSON config,
 including its defaults and overrides. This lets an experiment use the
 Stanford preprocessing settings in
-`/home/lyh/codes/CORTEG/configs/stanford_preprocessing.json` without copying
+`configs/stanford_preprocessing.json` without copying
 them into the experiment file.
 
 The artifact ID is a SHA-256 hash of resolved semantic configs, task dataset
@@ -55,7 +58,7 @@ The `command` argument vector must include `{subject}`, `{seed}`, and
       "protocol_id": "chronological_40ms_v1",
       "semantic_config": {
         "preprocessing": {
-          "$json": "/home/lyh/codes/CORTEG/configs/stanford_preprocessing.json"
+          "$json": "configs/stanford_preprocessing.json"
         },
         "target_alignment_ms": 40
       },
@@ -65,7 +68,7 @@ The `command` argument vector must include `{subject}`, `{seed}`, and
           "name": "STEEGFormer_small",
           "semantic_config": {
             "architecture": "ST-EEGFormer-small",
-            "checkpoint_sha256": "98d2848abdaea7a143d399c07f67f8782e07dd66e7c309ddb058c7158a8a8b02",
+            "checkpoint_release": "ST-EEGFormer-small checkpoint-300",
             "epochs": 200,
             "model_kwargs": {
               "$json": "/path/to/validated/small_config.json"
@@ -74,11 +77,11 @@ The `command` argument vector must include `{subject}`, `{seed}`, and
           "seeds": [1, 2, 42],
           "command": [
             "python",
-            "/home/lyh/codes/CORTEG/experiments/run_regression_hilo_clean.py",
+            "experiments/run_regression_hilo_clean.py",
             "--dataset", "Stanford",
             "--train_mode", "per_subject",
             "--data_root", "/path/to/prepared/Stanford",
-            "--raw_root", "/data/lyh/neural_data/ecog/fingerflex/data",
+            "--raw_root", "<RAW_ROOT>",
             "--model_kwargs_json", "/path/to/validated/small_config.json",
             "--subjects", "{subject}",
             "--seed", "{seed}",
@@ -101,12 +104,12 @@ mapping from seed string to JSON path. An experiment may contain both launched
 models and existing results; each task uses a shared protocol ID.
 
 ```bash
-python /home/lyh/codes/CORTEG/scripts/multiseed_regression.py run \
+python scripts/multiseed_regression.py run \
   --spec /path/to/experiment.json \
   --output-root /path/to/output_base \
   --max-parallel 2
 
-python /home/lyh/codes/CORTEG/scripts/multiseed_regression.py evaluate \
+python scripts/multiseed_regression.py evaluate \
   --spec /path/to/experiment.json \
   --output-root /path/to/output_base
 ```
