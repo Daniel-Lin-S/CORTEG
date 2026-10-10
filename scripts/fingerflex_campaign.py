@@ -49,6 +49,9 @@ LEGACY_FIT_SOURCE_SHA256 = (
 PORTABLE_FIT_SOURCE_SHA256 = (
     "3c5ad2c3c0bdfbe3325af8a9afaf4ffb6225acec6f0808284fdbc9863ee7f23c"
 )
+EXTENDED_FIT_SOURCE_SHA256 = (
+    "f70e65246df70b10c423f57f65e003a9a53a12857ca90aa448bca42786433afa"
+)
 
 
 def source_revision(path: Path) -> str:
@@ -146,7 +149,9 @@ def _legacy_training_matches(candidate: Path, config: dict) -> bool:
     )
     compatible_path_refactor = (
         old_fit_hash == LEGACY_FIT_SOURCE_SHA256
-        and current_fit_hash == PORTABLE_FIT_SOURCE_SHA256
+        and current_fit_hash in (
+            PORTABLE_FIT_SOURCE_SHA256, EXTENDED_FIT_SOURCE_SHA256
+        )
     )
     if old_fit_hash != current_fit_hash and not compatible_path_refactor:
         return False

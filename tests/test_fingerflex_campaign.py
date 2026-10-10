@@ -36,7 +36,7 @@ from experiments.fingerflex_campaign import (
 )
 from scripts.fingerflex_campaign import (
     LEGACY_FIT_SOURCE_SHA256,
-    PORTABLE_FIT_SOURCE_SHA256,
+    EXTENDED_FIT_SOURCE_SHA256,
     _holm,
     _paired_test,
     _worker,
@@ -84,7 +84,7 @@ class FingerflexCampaignTests(unittest.TestCase):
             sha256_file(Path(CONFIG["checkpoint"])),
         )
         self.assertEqual(
-            PORTABLE_FIT_SOURCE_SHA256,
+            EXTENDED_FIT_SOURCE_SHA256,
             sha256_file(REPO / "experiments" / "fingerflex_campaign.py"),
         )
         portable = json.loads(
