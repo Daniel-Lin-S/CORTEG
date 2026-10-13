@@ -25,13 +25,18 @@ from data.fingerflex_campaign import digest_array
 from evaluation.regression import regression_metrics
 from scripts.fingerflex_campaign import _holm, _paired_test
 from scripts.fingerflex_fit_campaigns import find_legacy, fit_root
-from scripts.fingerflex_linear_identity import ridge_identity
+from scripts.fingerflex_linear_identity import (
+    binned_ridge_identity, ridge_identity,
+)
 
 METRICS = ("pearson_r", "mse", "r2")
 SUPPORTED_MODELS = (
-    "corteg", "hilo", "pls", "cnn_gru", "ridge_early", "ridge_late",
+    "corteg", "hilo", "pls", "cnn_gru",
+    "ridge_early", "ridge_late", "ridge_early_binned",
 )
-DETERMINISTIC_MODELS = ("pls", "ridge_early", "ridge_late")
+DETERMINISTIC_MODELS = (
+    "pls", "ridge_early", "ridge_late", "ridge_early_binned",
+)
 COMPARISON_VERSION = "paired_subject_wilcoxon_v1"
 SIGN_FLIP_VERSION = "paired_subject_exact_sign_flip_v1"
 EXPECTED_RULES = {
@@ -369,10 +374,21 @@ def report(root: Path) -> dict:
 
 def _linear_fusion_fit_ids(study: dict, base: dict) -> dict[str, str]:
     """Derive fit identities from fitting semantics and stable roots."""
+    if set(study["models"]) == {
+        "ridge_early", "ridge_early_binned",
+    }:
+        if "binning" not in study:
+            raise ValueError("Binned comparison needs binning settings.")
+        return {
+            "ridge_early": ridge_identity(base, "ridge_early"),
+            "ridge_early_binned": binned_ridge_identity(
+                base, study["binning"],
+            ),
+        }
     if set(study["models"]) != set(LINEAR_FUSION_MODELS):
         raise ValueError(
             "Automatic fit identity is defined for the linear "
-            "fusion study only."
+            "fusion and binned-ridge studies only."
         )
     historical = {**study, "fractions": REUSED_FRACTIONS}
     legacy = find_legacy(base, historical)

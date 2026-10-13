@@ -19,7 +19,6 @@ import shlex
 import subprocess
 import sys
 import threading
-import time
 import uuid
 from pathlib import Path
 
@@ -35,9 +34,11 @@ from data.fingerflex_cache import (
 from experiments.fingerflex_campaign import fit_job
 from experiments.fingerflex_ridge import fit_ridge
 from infrastructure.compute import available_gpus, load_resources
+from infrastructure.fit_attempts import (
+    append_fit_event, quarantine_incomplete,
+)
 from infrastructure.training_lifecycle import (
-    append_training_event, attempt_log_path, coordinator_scope,
-    fit_task, register_campaign,
+    attempt_log_path, coordinator_scope, fit_task, register_campaign,
 )
 from scripts.fingerflex_comparison import (
     ensure_comparison,
@@ -64,7 +65,7 @@ SOURCE_FILES = (
     "experiments/ridge_cv.py",
     "models/linear_fusion.py",
     "data/fingerflex_linear.py",
-    "data/channel_time_features.py",
+    "preprocessing/channel_time_features.py",
     "evaluation/regression.py",
     "infrastructure/compute.py",
     "scripts/fingerflex_linear_identity.py",
@@ -278,27 +279,6 @@ def _job_path(
     )
 
 
-def _event(root: Path, event: dict, lock: threading.Lock) -> None:
-    """Append a synchronized model-specific worker event."""
-    record = {"time_utc": time.time(), **event}
-    with lock:
-        with (root / "status" / "jobs.jsonl").open("a") as stream:
-            stream.write(json.dumps(record) + "\n")
-        append_training_event(root, record)
-
-
-def _quarantine(output: Path, root: Path) -> None:
-    """Move an incomplete fit aside before a fresh attempt."""
-    if not output.exists() or (output / "result.json").is_file():
-        return
-    destination = (
-        root / "status" / "quarantine"
-        / f"{output.parent.name}_{output.name}_{time.time_ns()}"
-    )
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    output.rename(destination)
-
-
 def _worker(
     jobs: queue.Queue,
     roots: dict[str, Path],
@@ -319,7 +299,7 @@ def _worker(
             )
         except Exception as error:
             model, subject, fraction, seed = item
-            _event(roots[model], {
+            append_fit_event(roots[model], {
                 "state": "failed", "model": model,
                 "subject": subject, "fraction": fraction,
                 "seed": seed, "exit_code": None,
@@ -343,13 +323,13 @@ def _run_fit_attempt(
     repeat = "deterministic" if seed is None else f"seed{seed}"
     output = parent / repeat
     if (output / "result.json").is_file():
-        _event(root, {
+        append_fit_event(root, {
             "state": "skipped", "model": model,
             "subject": subject, "fraction": fraction,
             "seed": seed,
         }, lock)
         return
-    _quarantine(output, root)
+    quarantine_incomplete(output, root)
     output.mkdir(parents=True, exist_ok=True)
     selectors = {
         "model": model, "subject": subject,
@@ -377,7 +357,7 @@ def _run_fit_attempt(
             "MKL_NUM_THREADS",
         ):
             env[name] = str(resources["cpu_threads_per_worker"])
-    _event(root, {
+    append_fit_event(root, {
         "state": "running", "model": model,
         "subject": subject, "fraction": fraction,
         "seed": seed, "gpu": gpu,
@@ -394,7 +374,7 @@ def _run_fit_attempt(
         and (output / "result.json").is_file()
         else "failed"
     )
-    _event(root, {
+    append_fit_event(root, {
         "state": state, "model": model,
         "subject": subject, "fraction": fraction,
         "seed": seed, "gpu": gpu,
@@ -466,7 +446,7 @@ def _dispatch_jobs(
                 continue
             with lock:
                 jobs.put((model, subject, fraction, seed))
-                _event(roots[model], {
+                append_fit_event(roots[model], {
                     "state": "queued", "model": model,
                     "subject": subject, "fraction": fraction,
                     "seed": seed,
@@ -601,7 +581,7 @@ def main() -> None:
     comparison = matches[0]
     status_root = roots["corteg" if args.kind == "neural" else "ridge_early"]
     event_lock = threading.Lock()
-    _event(status_root, {
+    append_fit_event(status_root, {
         "state": "coordinator_running", "kind": args.kind,
     }, event_lock)
     try:
@@ -616,12 +596,12 @@ def main() -> None:
             finally:
                 fcntl.flock(stream, fcntl.LOCK_UN)
     except Exception as error:
-        _event(status_root, {
+        append_fit_event(status_root, {
             "state": "coordinator_failed", "kind": args.kind,
             "error": f"{type(error).__name__}: {error}",
         }, event_lock)
         raise
-    _event(status_root, {
+    append_fit_event(status_root, {
         "state": "coordinator_complete", "kind": args.kind,
     }, event_lock)
 

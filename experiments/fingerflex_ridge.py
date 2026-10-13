@@ -14,7 +14,7 @@ from pathlib import Path
 import joblib
 import numpy as np
 
-from data.channel_time_features import transform_streams
+from preprocessing.channel_time_features import transform_streams
 from data.fingerflex_linear import load_fingerflex_linear
 from experiments.fingerflex_campaign import split_fit_rows
 from evaluation.regression import (
@@ -157,6 +157,7 @@ def _save_fit(
         "model": model,
         "scalers": scalers,
         "selected_alpha_per_row": selection["selected"],
+        "selected_bin_count": identity.get("selected_bin_count"),
     }, output / "best.joblib")
     np.savez(
         output / "test_predictions.npz",

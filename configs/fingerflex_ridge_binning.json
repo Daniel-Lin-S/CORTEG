@@ -1,0 +1,20 @@
+{
+  "name": "stanford_finger_early_ridge_binning",
+  "source_campaign": "configs/fingerflex_campaign.json",
+  "subjects": ["bp", "cc", "ht", "jc", "jp", "mv", "wc", "wm", "zt"],
+  "fractions": [1.0, 0.5, 0.25],
+  "seeds": [0],
+  "models": ["ridge_early_binned", "ridge_early"],
+  "binning": {
+    "bin_counts": [50, 25, 12, 8],
+    "folds": 5,
+    "purge_rows": 25,
+    "alpha_per_training_row": [0.0001, 0.001, 0.01, 0.1, 1.0, 10.0, 100.0]
+  },
+  "comparison": {
+    "metrics": ["pearson_r", "mse", "r2"],
+    "paired_unit": "subject",
+    "test": "wilcoxon_signed_rank",
+    "holm_family": "metrics_within_pair_and_fraction"
+  }
+}

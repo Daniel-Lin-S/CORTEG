@@ -22,9 +22,12 @@ from plotting.regression import draw_line_band
 
 METRICS = ("pearson_r", "mse", "r2")
 SUPPORTED_MODELS = (
-    "corteg", "hilo", "pls", "cnn_gru", "ridge_early", "ridge_late",
+    "corteg", "hilo", "pls", "cnn_gru",
+    "ridge_early", "ridge_late", "ridge_early_binned",
 )
-DETERMINISTIC_MODELS = ("pls", "ridge_early", "ridge_late")
+DETERMINISTIC_MODELS = (
+    "pls", "ridge_early", "ridge_late", "ridge_early_binned",
+)
 LABELS = {
     "corteg": "CORTEG (ST-EEGFormer-small)",
     "hilo": "HiLoFuseNet",
@@ -32,6 +35,7 @@ LABELS = {
     "cnn_gru": "CNN-GRU (high gamma)",
     "ridge_early": "Ridge (early fusion)",
     "ridge_late": "Ridge (late fusion)",
+    "ridge_early_binned": "Temporal binning (CV selected)",
 }
 STYLES = {
     "corteg": ("#0072B2", "o"),
@@ -40,6 +44,7 @@ STYLES = {
     "cnn_gru": ("#CC79A7", "D"),
     "ridge_early": ("#E69F00", "v"),
     "ridge_late": ("#56B4E9", "P"),
+    "ridge_early_binned": ("#0072B2", "o"),
 }
 AXIS_LABELS = {
     "pearson_r": "Mean finger Pearson r",
@@ -57,6 +62,17 @@ TEST_LABELS = {
     "exact_sign_flip": "exact sign-flip",
     "wilcoxon_signed_rank": "two-sided Wilcoxon",
 }
+
+
+BINNING_TITLE = "Ridge regression (broadband + HGA early fusion)"
+BINNING_MODELS = {"ridge_early", "ridge_early_binned"}
+
+
+def _study_title(index: dict) -> str | None:
+    """Return the shared ridge title for the binning comparison."""
+    if set(index["fit_roots"]) == BINNING_MODELS:
+        return BINNING_TITLE
+    return None
 
 
 def _models(index: dict) -> tuple[str, ...]:
@@ -129,17 +145,21 @@ def _draw_curves(
     """Draw reusable model lines with available SD bands."""
     for index, model in enumerate(models):
         color, marker = STYLES[model]
+        label = (
+            "No temporal binning" if model == "ridge_early"
+            else LABELS[model]
+        ) if set(models) == BINNING_MODELS else LABELS[model]
         if np.isnan(std[index]).all():
             axis.plot(
                 fractions, mean[index], color=color, marker=marker,
-                label=LABELS[model],
+                label=label,
             )
         else:
             if not np.isfinite(std[index]).all():
                 raise ValueError(f"Partial SD band for {model}/{metric}.")
             draw_line_band(
                 axis, fractions, mean[index], std[index],
-                label=LABELS[model], color=color, marker=marker,
+                label=label, color=color, marker=marker,
                 lower_bound=0 if metric == "mse" else None,
             )
     axis.set_xlabel("Training proportion", fontsize=AXIS_FONT_SIZE)
@@ -163,8 +183,10 @@ def plot_subjects(root: Path, index: dict, summary: dict) -> None:
         _draw_curves(
             axis, fractions, mean, std, metric, _models(index),
         )
+        title = _study_title(index)
         axis.set_title(
-            f"{subject.upper()} — {AXIS_LABELS[metric]}",
+            f"{subject.upper()} — {title} — {AXIS_LABELS[metric]}"
+            if title else f"{subject.upper()} — {AXIS_LABELS[metric]}",
             fontsize=TITLE_FONT_SIZE,
         )
         handles, labels = axis.get_legend_handles_labels()
@@ -201,6 +223,9 @@ def plot_aggregate(root: Path, index: dict, summary: dict) -> None:
         if metric == "mse":
             axis.set_yscale("symlog", linthresh=1.0)
             axis.set_ylim(bottom=0)
+    title = _study_title(index)
+    if title:
+        figure.suptitle(title, fontsize=TITLE_FONT_SIZE)
     handles, labels = axes[0].get_legend_handles_labels()
     figure.legend(
         handles, labels, loc="center left",
@@ -277,8 +302,10 @@ def plot_pair_matrix(root: Path, index: dict, summary: dict) -> None:
     ).get("test", "wilcoxon_signed_rank")
     if test not in TEST_LABELS:
         raise ValueError(f"Unknown paired comparison test: {test}.")
+    title = _study_title(index)
     figure.suptitle(
-        "Paired subject mean differences (first minus second); "
+        (f"{title}\n" if title else "")
+        + "Paired subject mean differences (first minus second); "
         f"{TEST_LABELS[test]} p, Holm across metrics within pair and "
         "fraction. * p < 0.05",
         fontsize=TICK_FONT_SIZE,
