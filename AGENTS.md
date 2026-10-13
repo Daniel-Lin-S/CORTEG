@@ -8,6 +8,30 @@ You should always grill me on ALL technical details and design choices rather th
 
 Anti-example: I asked you to redesign the artifact figures, and you silently designed the content of one or several figures without checking details like x-y axis meanings, axis ticks, legends, plot timing with me.
 
+## Flexible configurations
+
+ALL scientific parameters (e.g., epoch number, number of folds in CV, learning rate) in modules should be recorded and manipulatable in configurations. Default values are allowed in scripts.
+
+NEVER request user to provide hash or fit-id in configuraitons. The hash should be resolved and added to artifact roots in rune-time, NOT provided by user.
+
+NEVER hash compaign artifact root with invocation parameters (subjects selected, number of GPUs used, memory upbound, etc.) that doesn't affect the model fitting results.
+
+## Artifacts
+
+For each experiment, the artifact root name should look like `<readable_name>__<semantic_hash>`.
+
+The resolve configuration (with default values filled, and overwrites replaced) should be saved in the artifact root.
+
+Artifact files should be saved with structure, NEVER generate hundreds of flat files under the root.
+
+## DISENTANGLEMENT
+
+NEVER entangle: model implementation, dataset I/O (including splitting), preprocessing, training strategy (like HPO), evaluation etc.. These should be implemented separately and coordinated by a training pipeline.
+
+In this way, changing the model doesn't require copying and pasting modules of other steps. 
+
+Models should be implemented and placed under `/home/lyh/codes/CORTEG/models`.
+
 ## Break-point restoration
 
 All experiments should store artifacts immediately after the results of one fit (the smallest unit of experiment, e.g., be one neural or non-neural fitting of a single random seed) are obtained to avoid losing results of already completed runs. However, failed, invalid, or interrupted run artifacts should be removed or quanrantined in the next invocation, starting a fresh experiment on that fit.
@@ -31,7 +55,7 @@ Undefined correlation metric (e.g., flat signal) can be treated as 0.
 
 NEVER directly remove or modify a previous completed run result -- `results.csv` and `test_summary.csv`. Appending to an incomplete result is allowed, but NOT modifying previous rows.
 
-NEVER reveal local paths (e.g., model checkpoints, dataset paths) in files tracked by GitHub. Store a separate local file for local paths. (with a template for new users)
+NEVER reveal local paths (e.g., model checkpoints, dataset paths), machine-related device settings, in files tracked by GitHub. Store a separate local file for local paths. (with a template for new users)
 
 DO NOT overwhelm documentations with heavy technial details -- whch make them unreadable.
 
