@@ -181,7 +181,10 @@ class FingerflexCampaignTests(unittest.TestCase):
             work: queue.Queue = queue.Queue()
             work.put(job)
             work.put(None)
-            with patch("subprocess.run") as process:
+            with patch("subprocess.run") as process, patch(
+                "infrastructure.training_lifecycle.LOG",
+                root / "training.jsonl",
+            ):
                 _worker(0, work, root, threading.Lock())
             process.assert_not_called()
             events = (root / "status" / "jobs.jsonl").read_text()

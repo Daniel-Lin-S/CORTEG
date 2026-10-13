@@ -82,9 +82,14 @@ class GenericHpoTests(unittest.TestCase):
                 ("width",), {},
             ), selected)
             jobs = [{"candidate": "a", "subject": "case1"}]
-            dispatch_jobs(
-                root, jobs, [7], lambda job, device: ("complete", 0),
-            )
+            with patch(
+                "infrastructure.training_lifecycle.LOG",
+                root / "training.jsonl",
+            ):
+                dispatch_jobs(
+                    root, jobs, [7],
+                    lambda job, device: ("complete", 0),
+                )
             records = [json.loads(line) for line in (
                 root / "status" / "jobs.jsonl"
             ).read_text().splitlines()]

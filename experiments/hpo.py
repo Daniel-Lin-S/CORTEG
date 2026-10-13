@@ -16,6 +16,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from infrastructure.training_lifecycle import append_training_event
+
 import numpy as np
 import torch
 
@@ -205,15 +207,21 @@ def dispatch_jobs(
             with lock:
                 with (search / "status" / "jobs.jsonl").open("a") as log:
                     log.write(json.dumps(event) + "\n")
+                append_training_event(search, event)
+            failure = None
             try:
                 state, exit_code = execute(job, device)
-            except Exception:
+            except Exception as error:
                 state, exit_code = "failed", -1
+                failure = f"{type(error).__name__}: {error}"
             event = {"time_utc": time.time(), "state": state,
                      "device": device, "exit_code": exit_code, **job}
+            if failure is not None:
+                event["error"] = failure
             with lock:
                 with (search / "status" / "jobs.jsonl").open("a") as log:
                     log.write(json.dumps(event) + "\n")
+                append_training_event(search, event)
             work.task_done()
 
     threads = [threading.Thread(target=worker, args=(device,))

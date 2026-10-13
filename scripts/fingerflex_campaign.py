@@ -30,6 +30,7 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+from infrastructure.training_lifecycle import append_training_event
 from data.fingerflex_cache import (
     cache_root,
     ensure_cache,
@@ -432,6 +433,7 @@ def _event(root: Path, event: dict, lock: threading.Lock) -> None:
     with lock:
         with (root / "status" / "jobs.jsonl").open("a") as stream:
             stream.write(json.dumps(record) + "\n")
+        append_training_event(root, record)
 
 
 def _worker(

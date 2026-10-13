@@ -34,6 +34,7 @@ from data.fingerflex_cache import (
 from experiments.fingerflex_campaign import fit_job
 from experiments.fingerflex_ridge import fit_ridge
 from infrastructure.compute import available_gpus, load_resources
+from infrastructure.training_lifecycle import append_training_event
 from scripts.fingerflex_comparison import (
     ensure_comparison,
     find_fit_roots,
@@ -250,11 +251,11 @@ def _job_path(
 
 def _event(root: Path, event: dict, lock: threading.Lock) -> None:
     """Append a synchronized model-specific worker event."""
+    record = {"time_utc": time.time(), **event}
     with lock:
         with (root / "status" / "jobs.jsonl").open("a") as stream:
-            stream.write(json.dumps({
-                "time_utc": time.time(), **event,
-            }) + "\n")
+            stream.write(json.dumps(record) + "\n")
+        append_training_event(root, record)
 
 
 def _quarantine(output: Path, root: Path) -> None:
@@ -501,15 +502,31 @@ def main() -> None:
             f"Expected one initialized comparison, got {matches}."
         )
     comparison = matches[0]
-    coordinate(
-        args.kind, study, roots, load_resources(args.local_resources),
-    )
-    with (comparison / "report.lock").open("a+") as stream:
-        fcntl.flock(stream, fcntl.LOCK_EX)
-        try:
-            report(comparison)
-        finally:
-            fcntl.flock(stream, fcntl.LOCK_UN)
+    status_root = roots["corteg" if args.kind == "neural" else "ridge_early"]
+    event_lock = threading.Lock()
+    _event(status_root, {
+        "state": "coordinator_running", "kind": args.kind,
+    }, event_lock)
+    try:
+        coordinate(
+            args.kind, study, roots,
+            load_resources(args.local_resources),
+        )
+        with (comparison / "report.lock").open("a+") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX)
+            try:
+                report(comparison)
+            finally:
+                fcntl.flock(stream, fcntl.LOCK_UN)
+    except Exception as error:
+        _event(status_root, {
+            "state": "coordinator_failed", "kind": args.kind,
+            "error": f"{type(error).__name__}: {error}",
+        }, event_lock)
+        raise
+    _event(status_root, {
+        "state": "coordinator_complete", "kind": args.kind,
+    }, event_lock)
 
 
 if __name__ == "__main__":

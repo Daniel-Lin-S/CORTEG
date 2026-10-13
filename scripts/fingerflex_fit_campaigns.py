@@ -28,6 +28,7 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+from infrastructure.training_lifecycle import append_training_event
 from data.fingerflex_cache import (
     cache_root,
     ensure_cache,
@@ -401,11 +402,11 @@ def _quarantine_incomplete(output: Path, root: Path) -> None:
 
 def _event(path: Path, event: dict, lock: threading.Lock) -> None:
     """Append one synchronized coordinator status event."""
+    record = {"time_utc": time.time(), **event}
     with lock:
         with path.open("a") as stream:
-            stream.write(json.dumps({
-                "time_utc": time.time(), **event,
-            }) + "\n")
+            stream.write(json.dumps(record) + "\n")
+        append_training_event(path.parent.parent, record)
 
 
 def _run_fit(
