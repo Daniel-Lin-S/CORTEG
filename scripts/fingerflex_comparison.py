@@ -22,17 +22,35 @@ if str(REPO) not in sys.path:
 
 from data.fingerflex_cache import preparation_id, resolve_campaign
 from data.fingerflex_campaign import digest_array
-from scripts.fingerflex_campaign import _holm
+from evaluation.regression import regression_metrics
+from scripts.fingerflex_campaign import _holm, _paired_test
+from scripts.fingerflex_fit_campaigns import find_legacy, fit_root
+from scripts.fingerflex_linear_identity import ridge_identity
 
 METRICS = ("pearson_r", "mse", "r2")
-SUPPORTED_MODELS = ("corteg", "hilo", "pls", "cnn_gru")
+SUPPORTED_MODELS = (
+    "corteg", "hilo", "pls", "cnn_gru", "ridge_early", "ridge_late",
+)
+DETERMINISTIC_MODELS = ("pls", "ridge_early", "ridge_late")
 COMPARISON_VERSION = "paired_subject_wilcoxon_v1"
+SIGN_FLIP_VERSION = "paired_subject_exact_sign_flip_v1"
 EXPECTED_RULES = {
     "metrics": list(METRICS),
     "paired_unit": "subject",
     "test": "wilcoxon_signed_rank",
     "holm_family": "metrics_within_pair_and_fraction",
 }
+SIGN_FLIP_RULES = {**EXPECTED_RULES, "test": "exact_sign_flip"}
+REUSED_FRACTIONS = (0.25, 1.0)
+LINEAR_FUSION_MODELS = (
+    "corteg", "hilo", "ridge_early", "ridge_late",
+)
+
+
+def _validate_rules(rules: dict) -> None:
+    """Accept historical and exact sign-flip comparison rules."""
+    if rules not in (EXPECTED_RULES, SIGN_FLIP_RULES):
+        raise ValueError(f"Unsupported comparison rules: {rules}.")
 
 
 def _paired_wilcoxon(difference: np.ndarray) -> float:
@@ -90,7 +108,10 @@ def ensure_comparison(
         for model, root in roots.items()
     }
     semantics = {
-        "version": COMPARISON_VERSION,
+        "version": (
+            SIGN_FLIP_VERSION if study["comparison"] == SIGN_FLIP_RULES
+            else COMPARISON_VERSION
+        ),
         "fit_ids": fit_ids,
         "rules": study["comparison"],
         "preprocessing_id": preparation_id(base),
@@ -143,8 +164,10 @@ def _job_path(
     )
 
 
-def _read_fit(path: Path, model: str, subject: str,
-              fraction: float, seed: int | None) -> dict | None:
+def _read_fit(
+    path: Path, model: str, subject: str, fraction: float,
+    seed: int | None, validate_scores: bool = False,
+) -> dict | None:
     """Load a complete, finite fit result or report it as pending."""
     result_path = path / "result.json"
     if not result_path.is_file():
@@ -163,14 +186,29 @@ def _read_fit(path: Path, model: str, subject: str,
         list(scores.values())
     ).all():
         raise ValueError(f"Invalid fit metrics: {result_path}.")
-    checkpoint = "best.joblib" if model == "pls" else "best.pt"
+    checkpoint = (
+        "best.joblib" if model in DETERMINISTIC_MODELS else "best.pt"
+    )
     if not (path / checkpoint).is_file():
         raise FileNotFoundError(f"Fit checkpoint absent: {path}.")
     predictions = path / "test_predictions.npz"
     if not predictions.is_file():
         raise FileNotFoundError(f"Test predictions absent: {path}.")
     with np.load(predictions) as saved:
-        result["truth_sha256"] = digest_array(saved["y"])
+        truth = saved["y"]
+        result["truth_sha256"] = digest_array(truth)
+        if validate_scores:
+            recalculated = regression_metrics(
+                truth, saved["y_hat"],
+            )
+    if validate_scores:
+        for metric in METRICS:
+            recorded = scores[metric]
+            actual = recalculated["overall"][metric]
+            if not np.isclose(recorded, actual, rtol=1e-4, atol=1e-5):
+                raise ValueError(
+                    f"Saved {metric} differs from predictions: {path}."
+                )
     return result
 
 
@@ -187,7 +225,7 @@ def _summarize(
         raise ValueError("Nonfinite fitted score.")
     means = scores.mean(axis=0)
     std = (
-        scores.std(axis=0, ddof=1) if model != "pls"
+        scores.std(axis=0, ddof=1) if model not in DETERMINISTIC_MODELS
         and len(results) > 1 else None
     )
     return {
@@ -197,7 +235,7 @@ def _summarize(
             METRICS,
             std.tolist() if std is not None else [None] * len(METRICS),
         )),
-        "seed_variance": "not_applicable" if model == "pls"
+        "seed_variance": "not_applicable" if model in DETERMINISTIC_MODELS
         else "sample_standard_deviation",
     }
 
@@ -223,10 +261,9 @@ def report(root: Path) -> dict:
     """Aggregate fits and test every complete paired model comparison."""
     index = json.loads((root / "index.json").read_text())
     rules = index.get("semantics", {}).get("rules", {})
-    if rules and rules != EXPECTED_RULES:
-        raise ValueError(
-            "Comparison rules differ from the Wilcoxon report policy."
-        )
+    if rules:
+        _validate_rules(rules)
+    test = rules.get("test", "wilcoxon_signed_rank")
     fit_roots = {
         model: Path(path) for model, path in index["fit_roots"].items()
     }
@@ -252,7 +289,10 @@ def report(root: Path) -> dict:
             groups: dict[str, list[dict]] = {}
             entries = {}
             for model in models:
-                seeds = [None] if model == "pls" else index["seeds"]
+                seeds = (
+                    [None] if model in DETERMINISTIC_MODELS
+                    else index["seeds"]
+                )
                 found = [
                     _read_fit(
                         _job_path(
@@ -260,6 +300,7 @@ def report(root: Path) -> dict:
                             subject, seed,
                         ),
                         model, subject, fraction, seed,
+                        validate_scores=bool(rules),
                     ) for seed in seeds
                 ]
                 results = [result for result in found if result is not None]
@@ -275,9 +316,11 @@ def report(root: Path) -> dict:
         for first, second in itertools.combinations(models, 2):
             complete = all(
                 subject_rows[subject].get(first, {}).get("fits")
-                == (1 if first == "pls" else len(index["seeds"]))
+                == (1 if first in DETERMINISTIC_MODELS
+                    else len(index["seeds"]))
                 and subject_rows[subject].get(second, {}).get("fits")
-                == (1 if second == "pls" else len(index["seeds"]))
+                == (1 if second in DETERMINISTIC_MODELS
+                    else len(index["seeds"]))
                 for subject in index["subjects"]
             )
             pair_key = f"{first}__{second}"
@@ -292,7 +335,10 @@ def report(root: Path) -> dict:
                 ]) for metric in METRICS
             }
             raw = {
-                metric: _paired_wilcoxon(values)
+                metric: (
+                    _paired_test(values) if test == "exact_sign_flip"
+                    else _paired_wilcoxon(values)
+                )
                 for metric, values in difference.items()
             }
             corrected = _holm(raw)
@@ -320,6 +366,25 @@ def report(root: Path) -> dict:
     return summary
 
 
+
+def _linear_fusion_fit_ids(study: dict, base: dict) -> dict[str, str]:
+    """Derive fit identities from fitting semantics and stable roots."""
+    if set(study["models"]) != set(LINEAR_FUSION_MODELS):
+        raise ValueError(
+            "Automatic fit identity is defined for the linear "
+            "fusion study only."
+        )
+    historical = {**study, "fractions": REUSED_FRACTIONS}
+    legacy = find_legacy(base, historical)
+    identities = {}
+    for model in ("corteg", "hilo"):
+        root = fit_root(model, study, base, legacy)
+        identities[model] = root.name.rsplit("__", 1)[1]
+    for model in ("ridge_early", "ridge_late"):
+        identities[model] = ridge_identity(base, model)
+    return identities
+
+
 def load_comparison_study(path: Path) -> tuple[dict, dict]:
     """Resolve portable comparison selectors and local artifact settings."""
     study = json.loads(path.read_text())
@@ -330,10 +395,9 @@ def load_comparison_study(path: Path) -> tuple[dict, dict]:
         raise ValueError(
             f"Comparison requires unique supported models: {models}."
         )
-    if set(study["fit_ids"]) != set(models):
+    if "fit_ids" in study and set(study["fit_ids"]) != set(models):
         raise ValueError("Fit IDs must name exactly the selected models.")
-    if study["comparison"] != EXPECTED_RULES:
-        raise ValueError("Comparison rules differ from the implemented test.")
+    _validate_rules(study["comparison"])
     campaign = Path(study["source_campaign"])
     if campaign.is_absolute():
         raise ValueError("Source campaign must be a repository path.")
@@ -344,23 +408,30 @@ def load_comparison_study(path: Path) -> tuple[dict, dict]:
         values = study[key]
         if not values or len(set(values)) != len(values):
             raise ValueError(f"Invalid {key} selectors: {values}.")
-        if not set(values).issubset(base[key]):
+        if key != "fractions" and not set(values).issubset(base[key]):
             raise ValueError(f"{key} selectors exceed the source campaign.")
+    if any(not 0 < value <= 1 for value in study["fractions"]):
+        raise ValueError("Comparison fractions must lie in (0, 1].")
+    if "fit_ids" not in study:
+        study["fit_ids"] = _linear_fusion_fit_ids(study, base)
     return study, base
 
 
 def find_fit_roots(study: dict, base: dict) -> dict[str, Path]:
-    """Resolve model fit roots by portable semantic IDs."""
+    """Resolve model roots by derived or recorded semantic identities."""
     parent = Path(base["artifact_base"]) / "fits"
     expected_preprocessing = preparation_id(base)
     roots = {}
+    requested = study["fit_ids"]
     for model in study["models"]:
         matches = []
         for index_path in parent.glob("*/index.json"):
+            if index_path.parent.is_symlink():
+                continue
             index = json.loads(index_path.read_text())
-            if index.get("model") != model or (
-                index.get("semantic_id") != study["fit_ids"][model]
-            ):
+            if index.get("model") != model:
+                continue
+            if index.get("semantic_id") != requested[model]:
                 continue
             if index.get("preprocessing_id") != expected_preprocessing:
                 raise ValueError(
@@ -371,8 +442,8 @@ def find_fit_roots(study: dict, base: dict) -> dict[str, Path]:
             matches.append(index_path.parent)
         if len(matches) != 1:
             raise ValueError(
-                f"Expected one fit root for {model} with ID "
-                f"{study['fit_ids'][model]}; found {len(matches)}."
+                f"Expected one fit root for {model} with semantic ID "
+                f"{requested[model]}; found {len(matches)}."
             )
         roots[model] = matches[0]
     return roots

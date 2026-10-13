@@ -1,0 +1,41 @@
+{
+  "name": "stanford_finger_linear_fusion",
+  "source_campaign": "configs/fingerflex_campaign.json",
+  "subjects": [
+    "bp",
+    "cc",
+    "ht",
+    "jc",
+    "jp",
+    "mv",
+    "wc",
+    "wm",
+    "zt"
+  ],
+  "fractions": [
+    1.0,
+    0.5,
+    0.25
+  ],
+  "seeds": [
+    0,
+    1,
+    2
+  ],
+  "models": [
+    "corteg",
+    "hilo",
+    "ridge_early",
+    "ridge_late"
+  ],
+  "comparison": {
+    "metrics": [
+      "pearson_r",
+      "mse",
+      "r2"
+    ],
+    "paired_unit": "subject",
+    "test": "wilcoxon_signed_rank",
+    "holm_family": "metrics_within_pair_and_fraction"
+  }
+}

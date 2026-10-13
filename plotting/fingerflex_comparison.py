@@ -21,18 +21,25 @@ import numpy as np
 from plotting.regression import draw_line_band
 
 METRICS = ("pearson_r", "mse", "r2")
-SUPPORTED_MODELS = ("corteg", "hilo", "pls", "cnn_gru")
+SUPPORTED_MODELS = (
+    "corteg", "hilo", "pls", "cnn_gru", "ridge_early", "ridge_late",
+)
+DETERMINISTIC_MODELS = ("pls", "ridge_early", "ridge_late")
 LABELS = {
     "corteg": "CORTEG (ST-EEGFormer-small)",
     "hilo": "HiLoFuseNet",
     "pls": "PLS (multiband Morlet)",
     "cnn_gru": "CNN-GRU (high gamma)",
+    "ridge_early": "Ridge (early fusion)",
+    "ridge_late": "Ridge (late fusion)",
 }
 STYLES = {
     "corteg": ("#0072B2", "o"),
     "hilo": ("#D55E00", "s"),
     "pls": ("#009E73", "^"),
     "cnn_gru": ("#CC79A7", "D"),
+    "ridge_early": ("#E69F00", "v"),
+    "ridge_late": ("#56B4E9", "P"),
 }
 AXIS_LABELS = {
     "pearson_r": "Mean finger Pearson r",
@@ -99,9 +106,11 @@ def _model_arrays(
     if not np.isfinite(mean).all():
         raise ValueError(f"Nonfinite subject means for {subject}/{metric}.")
     for model_index, model in enumerate(models):
-        if model == "pls":
+        if model in DETERMINISTIC_MODELS:
             if not np.isnan(std[model_index]).all():
-                raise ValueError("PLS seed SD must be inapplicable.")
+                raise ValueError(
+                    f"Deterministic {model} seed SD must be inapplicable."
+                )
         elif not np.isfinite(std[model_index]).all():
             raise ValueError(
                 f"Missing stochastic seed SD for {subject}/{metric}."

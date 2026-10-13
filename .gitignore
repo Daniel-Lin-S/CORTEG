@@ -62,4 +62,4 @@ slurm-*.out
 .claude/
 
 # Machine-specific FingerFlex inputs and executables
-configs/fingerflex_local.json
+*_local.json
