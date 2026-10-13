@@ -12,11 +12,14 @@ import queue
 import subprocess
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from infrastructure.training_lifecycle import append_training_event
+from infrastructure.training_lifecycle import (
+    append_training_event, attempt_log_path,
+)
 
 import numpy as np
 import torch
@@ -174,7 +177,7 @@ def select_candidate(
 
 def dispatch_jobs(
     search: Path, jobs: list[dict], workers: list[int],
-    execute: Callable[[dict, int], tuple[str, int]],
+    execute: Callable[[dict, int, Path], tuple[str, int]],
 ) -> None:
     """Execute independent jobs with one worker per assigned device.
 
@@ -186,15 +189,16 @@ def dispatch_jobs(
         Pending independent jobs.
     workers : list[int]
         Assigned device identifiers.
-    execute : Callable[[dict, int], tuple[str, int]]
-        Task callback returning state and process exit code.
+    execute : Callable[[dict, int, Path], tuple[str, int]]
+        Task callback receiving an attempt log path and returning state
+        and process exit code.
     """
     if not jobs:
         return
     if not workers:
         raise ValueError("Cannot dispatch jobs without workers.")
     work: queue.Queue = queue.Queue()
-    lock = threading.Lock()
+    lock = threading.RLock()
 
     def worker(device: int) -> None:
         while True:
@@ -202,20 +206,32 @@ def dispatch_jobs(
             if job is None:
                 work.task_done()
                 return
-            event = {"time_utc": time.time(), "state": "running",
-                     "device": device, **job}
+            attempt_id = uuid.uuid4().hex
+            attempt_log = attempt_log_path(search, job, attempt_id)
+            event = {
+                "time_utc": time.time(), "state": "running",
+                "attempt_id": attempt_id,
+                "attempt_log": str(attempt_log),
+                "device": device, **job,
+            }
             with lock:
                 with (search / "status" / "jobs.jsonl").open("a") as log:
                     log.write(json.dumps(event) + "\n")
                 append_training_event(search, event)
             failure = None
             try:
-                state, exit_code = execute(job, device)
+                state, exit_code = execute(
+                    job, device, attempt_log,
+                )
             except Exception as error:
                 state, exit_code = "failed", -1
                 failure = f"{type(error).__name__}: {error}"
-            event = {"time_utc": time.time(), "state": state,
-                     "device": device, "exit_code": exit_code, **job}
+            event = {
+                "time_utc": time.time(), "state": state,
+                "attempt_id": attempt_id,
+                "attempt_log": str(attempt_log),
+                "device": device, "exit_code": exit_code, **job,
+            }
             if failure is not None:
                 event["error"] = failure
             with lock:
@@ -229,7 +245,12 @@ def dispatch_jobs(
     for thread in threads:
         thread.start()
     for job in jobs:
-        work.put(job)
+        event = {"time_utc": time.time(), "state": "queued", **job}
+        with lock:
+            work.put(job)
+            with (search / "status" / "jobs.jsonl").open("a") as log:
+                log.write(json.dumps(event) + "\n")
+            append_training_event(search, event)
     work.join()
     for _ in threads:
         work.put(None)

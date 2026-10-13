@@ -29,6 +29,7 @@ from data.fingerflex_cache import (
     sha256_file,
 )
 from data.fingerflex_campaign import digest_array
+from infrastructure.training_lifecycle import fit_task
 from experiments.hpo import (
     dispatch_jobs, enumerate_grid, pending_jobs as generic_pending_jobs,
     select_candidate,
@@ -242,7 +243,10 @@ def fit_path(root: Path, fraction: float, subject: str,
     )
 
 
-def pending_jobs(search: Path, spec: dict, mode: str) -> list[dict]:
+def pending_jobs(
+    search: Path, spec: dict, mode: str,
+    include_completed: bool = False,
+) -> list[dict]:
     """Map search completion state to generic HPO job enumeration."""
     index = json.loads((search / "index.json").read_text())
     selected = None
@@ -263,6 +267,8 @@ def pending_jobs(search: Path, spec: dict, mode: str) -> list[dict]:
     }
 
     def complete(job: dict) -> bool:
+        if include_completed:
+            return False
         root = Path(index["candidates"][job["candidate"]])
         output = fit_path(
             root, job["fraction"], job["unit"], job["seed"],
@@ -286,6 +292,29 @@ def pending_jobs(search: Path, spec: dict, mode: str) -> list[dict]:
     ]
 
 
+def progress_tasks(search: Path, spec: dict, phase: str) -> list[dict]:
+    """Describe every expected marker for one selected HPO phase."""
+    index = json.loads((search / "index.json").read_text())
+    tasks = []
+    for job in pending_jobs(
+        search, spec, phase, include_completed=True,
+    ):
+        root = Path(index["candidates"][job["candidate"]])
+        output = fit_path(
+            root, job["fraction"], job["subject"], job["seed"],
+        )
+        marker = (
+            "validation_result.json" if job["mode"] == "screen"
+            else "result.json"
+        )
+        tasks.append(fit_task(
+            search, output / marker, candidate=job["candidate"],
+            mode=job["mode"], subject=job["subject"],
+            fraction=job["fraction"], seed=job["seed"],
+        ))
+    return tasks
+
+
 def _quarantine(output: Path, search: Path, marker: str) -> None:
     """Move an interrupted fit aside before a fresh attempt."""
     if not output.exists() or (output / marker).is_file():
@@ -304,7 +333,9 @@ def dispatch(search: Path, spec: dict, phase: str,
     pending = pending_jobs(search, spec, phase)
     index = json.loads((search / "index.json").read_text())
 
-    def execute(job: dict, gpu: int) -> tuple[str, int]:
+    def execute(
+        job: dict, gpu: int, attempt_log: Path,
+    ) -> tuple[str, int]:
         root = Path(index["candidates"][job["candidate"]])
         output = fit_path(
             root, job["fraction"], job["subject"], job["seed"],
@@ -327,7 +358,7 @@ def dispatch(search: Path, spec: dict, phase: str,
         ]
         env = dict(os.environ)
         env["CUDA_VISIBLE_DEVICES"] = str(gpu)
-        with (output / "worker.log").open("a") as stream:
+        with attempt_log.open("w") as stream:
             completed = subprocess.run(
                 command, cwd=REPO, env=env, stdout=stream,
                 stderr=subprocess.STDOUT, check=False,

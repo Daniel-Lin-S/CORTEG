@@ -20,6 +20,9 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from experiments.hpo import select_gpus
+from infrastructure.training_lifecycle import (
+    coordinator_scope, register_campaign,
+)
 
 
 def load_adapter(module_name: str) -> object:
@@ -51,6 +54,9 @@ def coordinate(adapter: object, search: Path, spec: dict,
     )
     adapter.dispatch(search, spec, "screen", gpus)
     adapter.select(search, spec)
+    register_campaign(
+        search, adapter.progress_tasks(search, spec, "final"),
+    )
     adapter.dispatch(search, spec, "final", gpus)
     comparison = adapter.finish_comparison(search, spec, base)
     print(comparison.resolve(), flush=True)
@@ -83,6 +89,13 @@ def main() -> None:
     adapter = load_adapter(config["adapter"])
     spec, fit_study, base, roots = adapter.load_spec(args.config)
     search = adapter.ensure_search(spec, fit_study, base, roots)
+    screening = adapter.progress_tasks(search, spec, "screen")
+    if screening:
+        register_campaign(search, screening)
+    if (search / "selection.json").is_file():
+        register_campaign(
+            search, adapter.progress_tasks(search, spec, "final"),
+        )
     print(search.resolve(), flush=True)
     if args.command == "init":
         return
@@ -112,7 +125,8 @@ def main() -> None:
         print(f"tmux session: {session}", flush=True)
         return
     try:
-        coordinate(adapter, search, spec, base)
+        with coordinator_scope(search, "hpo"):
+            coordinate(adapter, search, spec, base)
     except Exception:
         (search / "status" / "coordinator_error.log").write_text(
             traceback.format_exc()

@@ -22,6 +22,7 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -30,7 +31,10 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from infrastructure.training_lifecycle import append_training_event
+from infrastructure.training_lifecycle import (
+    append_training_event, attempt_log_path, coordinator_scope,
+    fit_task, register_campaign,
+)
 from data.fingerflex_cache import (
     cache_root,
     ensure_cache,
@@ -436,60 +440,117 @@ def _event(root: Path, event: dict, lock: threading.Lock) -> None:
         append_training_event(root, record)
 
 
+def _register_progress(root: Path, config: dict) -> None:
+    """Register all configured subject-level neural fits."""
+    tasks = []
+    for subject in dict.fromkeys(config["subjects"]):
+        for job in jobs_for_subject(subject, config):
+            marker = job_path(root, job) / "result.json"
+            tasks.append(fit_task(
+                root, marker, model=job["model"],
+                subject=subject, fraction=job["fraction"],
+                seed=job["seed"], delay=job["delay"],
+            ))
+    register_campaign(root, tasks)
+
+
+def _quarantine_incomplete(output: Path, root: Path) -> None:
+    """Preserve a failed partial attempt before restarting a fit."""
+    if not output.exists() or (output / "result.json").is_file():
+        return
+    destination = (
+        root / "status" / "quarantine"
+        / f"{output.parent.name}_{output.name}_{time.time_ns()}"
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    output.rename(destination)
+
+
 def _worker(
-    gpu: int,
-    work: queue.Queue,
-    root: Path,
+    gpu: int, work: queue.Queue, root: Path,
     lock: threading.Lock,
 ) -> None:
-    """Run queued independent fits on one assigned physical GPU."""
+    """Run queued fits while preserving subsequent jobs on failure."""
     while True:
         job = work.get()
         if job is None:
             work.task_done()
             return
-        output = job_path(root, job)
-        output.mkdir(parents=True, exist_ok=True)
-        if (output / "result.json").exists():
-            _event(root, {"state": "skipped", "job": job,
-                          "gpu": gpu}, lock)
+        attempt_id = uuid.uuid4().hex
+        try:
+            _run_fit_attempt(gpu, root, job, lock, attempt_id)
+        except Exception as error:
+            _event(root, {
+                "state": "failed", "job": job, "gpu": gpu,
+                "exit_code": None, "attempt_id": attempt_id,
+                "error": f"{type(error).__name__}: {error}",
+            }, lock)
+        finally:
             work.task_done()
-            continue
-        _event(root, {"state": "running", "job": job,
+
+
+def _run_fit_attempt(
+    gpu: int, root: Path, job: dict, lock: threading.Lock,
+    attempt_id: str,
+) -> None:
+    """Launch one saved neural fit and capture its attempt output."""
+    output = job_path(root, job)
+    if (output / "result.json").exists():
+        _event(root, {"state": "skipped", "job": job,
                       "gpu": gpu}, lock)
-        command = [
-            sys.executable, str(REPO / "scripts" / "fingerflex_campaign.py"),
-            "fit", "--root", str(root), "--model", job["model"],
-            "--subject", job["subject"],
-            "--fraction", str(job["fraction"]),
-            "--seed", str(job["seed"]),
-            "--delay", str(job["delay"]),
-        ]
-        env = dict(os.environ)
-        env["CUDA_VISIBLE_DEVICES"] = str(gpu)
-        with (output / "worker.log").open("a") as log:
-            completed = subprocess.run(
-                command, cwd=REPO, env=env,
-                stdout=log, stderr=subprocess.STDOUT,
-            )
-        state = (
-            "complete" if completed.returncode == 0
-            and (output / "result.json").exists() else "failed"
+        return
+    _quarantine_incomplete(output, root)
+    output.mkdir(parents=True, exist_ok=True)
+    attempt_log = attempt_log_path(root, job, attempt_id)
+    (output / "worker.log").symlink_to(attempt_log)
+    _event(root, {
+        "state": "running", "job": job, "gpu": gpu,
+        "attempt_id": attempt_id,
+        "attempt_log": str(attempt_log),
+    }, lock)
+    command = [
+        sys.executable, str(REPO / "scripts" / "fingerflex_campaign.py"),
+        "fit", "--root", str(root), "--model", job["model"],
+        "--subject", job["subject"],
+        "--fraction", str(job["fraction"]),
+        "--seed", str(job["seed"]),
+        "--delay", str(job["delay"]),
+    ]
+    env = dict(os.environ)
+    env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    with attempt_log.open("w") as log:
+        completed = subprocess.run(
+            command, cwd=REPO, env=env,
+            stdout=log, stderr=subprocess.STDOUT,
         )
-        _event(root, {"state": state, "job": job, "gpu": gpu,
-                      "exit_code": completed.returncode}, lock)
-        work.task_done()
+    state = (
+        "complete" if completed.returncode == 0
+        and (output / "result.json").exists() else "failed"
+    )
+    _event(root, {
+        "state": state, "job": job, "gpu": gpu,
+        "exit_code": completed.returncode,
+        "attempt_id": attempt_id,
+        "attempt_log": str(attempt_log),
+    }, lock)
 
 
 def coordinate(root: Path, config: dict) -> None:
     """Reuse or prepare subjects and run selected fits on four GPUs."""
+    _register_progress(root, config)
+    with coordinator_scope(root, "fingerflex", ("corteg", "hilo")):
+        _coordinate_registered(root, config)
+
+
+def _coordinate_registered(root: Path, config: dict) -> None:
+    """Prepare subjects and dispatch registered jobs."""
     selected = select_gpus()
     status = root / "status"
     (status / "gpu_assignment.json").write_text(
         json.dumps({"physical_gpu_indices": selected,
                     "minimum_free_mib": MIN_FREE_MIB}, indent=2)
     )
-    lock = threading.Lock()
+    lock = threading.RLock()
     work: queue.Queue = queue.Queue()
     threads = [threading.Thread(
         target=_worker, args=(gpu, work, root, lock), daemon=True,
@@ -513,8 +574,13 @@ def coordinate(root: Path, config: dict) -> None:
                 "subject": subject,
             }, lock)
             for job in jobs_for_subject(subject, config):
-                work.put(job)
-                _event(root, {"state": "queued", "job": job}, lock)
+                if (job_path(root, job) / "result.json").is_file():
+                    continue
+                with lock:
+                    work.put(job)
+                    _event(root, {
+                        "state": "queued", "job": job,
+                    }, lock)
         work.join()
     except Exception:
         (status / "coordinator_error.log").write_text(
@@ -650,6 +716,7 @@ def main() -> None:
     elif args.command == "launch":
         config = resolve_campaign(args.config, args.local_config)
         root = ensure_artifact(config)
+        _register_progress(root, config)
         print(root, flush=True)
         pending = sum(
             not (job_path(root, job) / "result.json").exists()

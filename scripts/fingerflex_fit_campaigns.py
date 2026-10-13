@@ -20,6 +20,7 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -28,7 +29,10 @@ REPO = Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
-from infrastructure.training_lifecycle import append_training_event
+from infrastructure.training_lifecycle import (
+    append_training_event, attempt_log_path, coordinator_scope,
+    fit_task, register_campaign,
+)
 from data.fingerflex_cache import (
     cache_root,
     ensure_cache,
@@ -409,6 +413,26 @@ def _event(path: Path, event: dict, lock: threading.Lock) -> None:
         append_training_event(path.parent.parent, record)
 
 
+def _register_progress(
+    study: dict, roots: dict[str, Path], comparison: Path,
+) -> None:
+    """Register selected legacy, PLS, and CNN-GRU fit markers."""
+    tasks = []
+    for model, fraction, subject in itertools.product(
+        study["models"], study["fractions"], study["subjects"],
+    ):
+        seeds = (None,) if model == "pls" else study["seeds"]
+        for seed in seeds:
+            marker = job_path(
+                roots[model], model, fraction, subject, seed,
+            ) / "result.json"
+            tasks.append(fit_task(
+                roots[model], marker, model=model,
+                subject=subject, fraction=fraction, seed=seed,
+            ))
+    register_campaign(comparison, tasks)
+
+
 def _run_fit(
     model: str,
     root: Path,
@@ -437,70 +461,112 @@ def _run_fit(
 
 
 def _worker(
-    model: str,
-    root: Path,
-    jobs: queue.Queue,
-    events: Path,
-    lock: threading.Lock,
-    gpu: int | None,
-    runtime: dict,
+    model: str, root: Path, jobs: queue.Queue,
+    events: Path, lock: threading.Lock,
+    gpu: int | None, runtime: dict,
 ) -> None:
-    """Run independent fits, logging errors without stopping other jobs."""
+    """Run independent fits without abandoning later queued work."""
     while True:
         item = jobs.get()
         if item is None:
             jobs.task_done()
-            break
-        subject, fraction, seed = item
-        output = job_path(root, model, fraction, subject, seed)
-        if (output / "result.json").is_file():
-            _event(events, {
-                "state": "skipped", "model": model,
-                "subject": subject, "fraction": fraction, "seed": seed,
-            }, lock)
-            jobs.task_done()
-            continue
-        command = [
-            sys.executable, str(Path(__file__).resolve()), "fit",
-            "--model", model, "--fit-root", str(root),
-            "--subject", subject, "--fraction", str(fraction),
-        ]
-        if seed is not None:
-            command.extend(("--seed", str(seed)))
-        env = dict(os.environ)
-        if gpu is not None:
-            env["CUDA_VISIBLE_DEVICES"] = str(gpu)
-        else:
-            command = pls_cpu_command(command, runtime)
-            env.update({
-                "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1",
-                "MKL_NUM_THREADS": "1",
-            })
-        _quarantine_incomplete(output, root)
-        output.mkdir(parents=True, exist_ok=True)
-        _event(events, {
-            "state": "running", "model": model, "subject": subject,
-            "fraction": fraction, "seed": seed, "gpu": gpu,
-        }, lock)
-        with (output / "worker.log").open("a") as log:
-            completed = subprocess.run(
-                command, cwd=REPO, env=env, stdout=log,
-                stderr=subprocess.STDOUT, check=False,
+            return
+        attempt_id = uuid.uuid4().hex
+        try:
+            _run_fit_attempt(
+                model, root, item, events, lock, gpu, runtime,
+                attempt_id,
             )
-        state = (
-            "complete" if completed.returncode == 0
-            and (output / "result.json").is_file() else "failed"
-        )
+        except Exception as error:
+            subject, fraction, seed = item
+            _event(events, {
+                "state": "failed", "model": model,
+                "subject": subject, "fraction": fraction,
+                "seed": seed, "exit_code": None,
+                "attempt_id": attempt_id,
+                "error": f"{type(error).__name__}: {error}",
+            }, lock)
+        finally:
+            jobs.task_done()
+
+
+def _run_fit_attempt(
+    model: str, root: Path,
+    item: tuple[str, float, int | None],
+    events: Path, lock: threading.Lock,
+    gpu: int | None, runtime: dict,
+    attempt_id: str,
+) -> None:
+    """Run one PLS or CNN-GRU fit and retain attempt diagnostics."""
+    subject, fraction, seed = item
+    output = job_path(root, model, fraction, subject, seed)
+    if (output / "result.json").is_file():
         _event(events, {
-            "state": state, "model": model, "subject": subject,
-            "fraction": fraction, "seed": seed, "gpu": gpu,
-            "exit_code": completed.returncode,
+            "state": "skipped", "model": model,
+            "subject": subject, "fraction": fraction, "seed": seed,
         }, lock)
-        jobs.task_done()
+        return
+    command = [
+        sys.executable, str(Path(__file__).resolve()), "fit",
+        "--model", model, "--fit-root", str(root),
+        "--subject", subject, "--fraction", str(fraction),
+    ]
+    if seed is not None:
+        command.extend(("--seed", str(seed)))
+    env = dict(os.environ)
+    if gpu is not None:
+        env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    else:
+        command = pls_cpu_command(command, runtime)
+        env.update({
+            "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1",
+            "MKL_NUM_THREADS": "1",
+        })
+    _quarantine_incomplete(output, root)
+    output.mkdir(parents=True, exist_ok=True)
+    selectors = {
+        "model": model, "subject": subject,
+        "fraction": fraction, "seed": seed,
+    }
+    attempt_log = attempt_log_path(root, selectors, attempt_id)
+    (output / "worker.log").symlink_to(attempt_log)
+    _event(events, {
+        "state": "running", "model": model, "subject": subject,
+        "fraction": fraction, "seed": seed, "gpu": gpu,
+        "attempt_id": attempt_id,
+        "attempt_log": str(attempt_log),
+    }, lock)
+    with attempt_log.open("w") as log:
+        completed = subprocess.run(
+            command, cwd=REPO, env=env, stdout=log,
+            stderr=subprocess.STDOUT, check=False,
+        )
+    state = (
+        "complete" if completed.returncode == 0
+        and (output / "result.json").is_file() else "failed"
+    )
+    _event(events, {
+        "state": state, "model": model, "subject": subject,
+        "fraction": fraction, "seed": seed, "gpu": gpu,
+        "exit_code": completed.returncode,
+        "attempt_id": attempt_id,
+        "attempt_log": str(attempt_log),
+    }, lock)
 
 
-def coordinate(study: dict, roots: dict[str, Path]) -> None:
-    """Dispatch PLS on CPU and CNN-GRU across four capable GPUs."""
+def coordinate(
+    study: dict, roots: dict[str, Path], comparison: Path,
+) -> None:
+    """Track all selected fits while dispatching new model workers."""
+    _register_progress(study, roots, comparison)
+    with coordinator_scope(comparison, "four_models", NEW_MODELS):
+        _coordinate_registered(study, roots)
+
+
+def _coordinate_registered(
+    study: dict, roots: dict[str, Path],
+) -> None:
+    """Dispatch PLS on CPU and CNN-GRU across fit resources."""
     query = subprocess.check_output([
         "nvidia-smi",
         "--query-gpu=index,memory.free,utilization.gpu",
@@ -511,7 +577,7 @@ def coordinate(study: dict, roots: dict[str, Path]) -> None:
     (cnn_status / "gpu_assignment.json").write_text(
         json.dumps({"physical_gpu_indices": gpus}, indent=2) + "\n"
     )
-    lock = threading.Lock()
+    lock = threading.RLock()
     cnn_queue: queue.Queue = queue.Queue()
     pls_queue: queue.Queue = queue.Queue()
     threads = [
@@ -540,11 +606,33 @@ def coordinate(study: dict, roots: dict[str, Path]) -> None:
     for subject, fraction, seed in itertools.product(
         study["subjects"], study["fractions"], study["seeds"],
     ):
-        cnn_queue.put((subject, fraction, seed))
+        marker = job_path(
+            roots["cnn_gru"], "cnn_gru", fraction, subject, seed,
+        ) / "result.json"
+        if marker.is_file():
+            continue
+        with lock:
+            cnn_queue.put((subject, fraction, seed))
+            _event(cnn_status / "jobs.jsonl", {
+                "state": "queued", "model": "cnn_gru",
+                "subject": subject, "fraction": fraction,
+                "seed": seed,
+            }, lock)
     for fraction, subject in itertools.product(
         study["fractions"], study["subjects"],
     ):
-        pls_queue.put((subject, fraction, None))
+        marker = job_path(
+            roots["pls"], "pls", fraction, subject, None,
+        ) / "result.json"
+        if marker.is_file():
+            continue
+        with lock:
+            pls_queue.put((subject, fraction, None))
+            _event(roots["pls"] / "status" / "jobs.jsonl", {
+                "state": "queued", "model": "pls",
+                "subject": subject, "fraction": fraction,
+                "seed": None,
+            }, lock)
     cnn_queue.join()
     pls_queue.join()
     for _ in gpus:
@@ -581,6 +669,7 @@ def main() -> None:
     roots = ensure_fit_roots(study, base, legacy)
     from scripts.fingerflex_comparison import ensure_comparison
     comparison = ensure_comparison(study, base, roots)
+    _register_progress(study, roots, comparison)
     print(comparison, flush=True)
     if args.command == "init":
         return
@@ -621,7 +710,7 @@ def main() -> None:
         print(f"tmux session: {session}; pending fits: {pending}", flush=True)
         return
     try:
-        coordinate(study, roots)
+        coordinate(study, roots, comparison)
         from scripts.fingerflex_comparison import report
         report(comparison)
     except Exception:

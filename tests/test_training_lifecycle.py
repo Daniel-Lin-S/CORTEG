@@ -56,8 +56,10 @@ class TrainingLifecycleTests(unittest.TestCase):
                 append_training_event(root, failed)
                 self.assertEqual(import_training_events([root]), 1)
                 self.assertEqual(import_training_events([root]), 0)
+            history_log = log.parent / root.name / "events.jsonl"
             rows = [
-                json.loads(line) for line in log.read_text().splitlines()
+                json.loads(line)
+                for line in history_log.read_text().splitlines()
             ]
             self.assertEqual(len(rows), 2)
             self.assertEqual(rows[0]["state"], "failed")

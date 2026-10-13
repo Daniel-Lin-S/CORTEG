@@ -20,6 +20,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -34,7 +35,10 @@ from data.fingerflex_cache import (
 from experiments.fingerflex_campaign import fit_job
 from experiments.fingerflex_ridge import fit_ridge
 from infrastructure.compute import available_gpus, load_resources
-from infrastructure.training_lifecycle import append_training_event
+from infrastructure.training_lifecycle import (
+    append_training_event, attempt_log_path, coordinator_scope,
+    fit_task, register_campaign,
+)
 from scripts.fingerflex_comparison import (
     ensure_comparison,
     find_fit_roots,
@@ -210,6 +214,30 @@ def _initialize_ridge_roots(base: dict) -> None:
             path.write_text(json.dumps(index, indent=2) + "\n")
 
 
+def _register_progress(
+    study: dict, roots: dict[str, Path], comparison: Path,
+) -> None:
+    """Register every selected fit, including reusable neural fractions."""
+    tasks = []
+    for model, fraction, subject in itertools.product(
+        study["models"], study["fractions"], study["subjects"],
+    ):
+        seeds = study["seeds"] if model in NEURAL else (None,)
+        for seed in seeds:
+            repeat = (
+                "deterministic" if seed is None else f"seed{seed}"
+            )
+            marker = (
+                roots[model] / "runs" / f"{int(fraction * 100)}pct"
+                / model / subject / repeat / "result.json"
+            )
+            tasks.append(fit_task(
+                roots[model], marker, model=model, subject=subject,
+                fraction=fraction, seed=seed,
+            ))
+    register_campaign(comparison, tasks)
+
+
 def initialize(study: dict, base: dict) -> tuple[dict, Path]:
     """Validate reusable fits and prepare stable new artifacts."""
     roots = {
@@ -233,6 +261,7 @@ def initialize(study: dict, base: dict) -> tuple[dict, Path]:
         roots[model] = ridge_root(base, model)
     ordered = {model: roots[model] for model in study["models"]}
     comparison = ensure_comparison(study, base, ordered)
+    _register_progress(study, ordered, comparison)
     return ordered, comparison
 
 
@@ -277,76 +306,119 @@ def _worker(
     gpu: int | None,
     resources: dict[str, int],
 ) -> None:
-    """Execute independent fits and continue after nonfatal failures."""
+    """Run independent fits and keep the queue live after failures."""
     while True:
         item = jobs.get()
         if item is None:
             jobs.task_done()
             return
-        model, subject, fraction, seed = item
-        root = roots[model]
-        parent = _job_path(root, model, subject, fraction)
-        repeat = "deterministic" if seed is None else f"seed{seed}"
-        output = parent / repeat
-        if (output / "result.json").is_file():
-            _event(root, {
-                "state": "skipped", "model": model,
-                "subject": subject, "fraction": fraction,
-                "seed": seed,
-            }, lock)
-            jobs.task_done()
-            continue
-        _quarantine(output, root)
-        output.mkdir(parents=True, exist_ok=True)
-        (output / "source_revision.json").write_text(
-            json.dumps(_source_hashes(root), indent=2) + "\n"
-        )
-        command = [
-            sys.executable, str(REPO / "scripts"
-                                / "fingerflex_linear_fusion.py"),
-            "fit", "--model", model, "--subject", subject,
-            "--fraction", str(fraction),
-        ]
-        if seed is not None:
-            command.extend(("--seed", str(seed)))
-        env = dict(os.environ)
-        if gpu is not None:
-            env["CUDA_VISIBLE_DEVICES"] = str(gpu)
-        else:
-            for name in (
-                "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
-                "MKL_NUM_THREADS",
-            ):
-                env[name] = str(resources["cpu_threads_per_worker"])
-        _event(root, {
-            "state": "running", "model": model,
-            "subject": subject, "fraction": fraction,
-            "seed": seed, "gpu": gpu,
-        }, lock)
-        with (output / "worker.log").open("a") as log:
-            completed = subprocess.run(
-                command, cwd=REPO, env=env, stdout=log,
-                stderr=subprocess.STDOUT, check=False,
+        attempt_id = uuid.uuid4().hex
+        try:
+            _run_fit_attempt(
+                item, roots, lock, gpu, resources, attempt_id,
             )
-        state = (
-            "complete" if completed.returncode == 0
-            and (output / "result.json").is_file()
-            else "failed"
-        )
+        except Exception as error:
+            model, subject, fraction, seed = item
+            _event(roots[model], {
+                "state": "failed", "model": model,
+                "subject": subject, "fraction": fraction,
+                "seed": seed, "exit_code": None,
+                "attempt_id": attempt_id,
+                "error": f"{type(error).__name__}: {error}",
+            }, lock)
+        finally:
+            jobs.task_done()
+
+
+def _run_fit_attempt(
+    item: tuple[str, str, float, int | None],
+    roots: dict[str, Path], lock: threading.Lock,
+    gpu: int | None, resources: dict[str, int],
+    attempt_id: str,
+) -> None:
+    """Persist one fit result or one attributable failure event."""
+    model, subject, fraction, seed = item
+    root = roots[model]
+    parent = _job_path(root, model, subject, fraction)
+    repeat = "deterministic" if seed is None else f"seed{seed}"
+    output = parent / repeat
+    if (output / "result.json").is_file():
         _event(root, {
-            "state": state, "model": model,
+            "state": "skipped", "model": model,
             "subject": subject, "fraction": fraction,
-            "seed": seed, "gpu": gpu,
-            "exit_code": completed.returncode,
+            "seed": seed,
         }, lock)
-        jobs.task_done()
+        return
+    _quarantine(output, root)
+    output.mkdir(parents=True, exist_ok=True)
+    selectors = {
+        "model": model, "subject": subject,
+        "fraction": fraction, "seed": seed,
+    }
+    attempt_log = attempt_log_path(root, selectors, attempt_id)
+    (output / "worker.log").symlink_to(attempt_log)
+    (output / "source_revision.json").write_text(
+        json.dumps(_source_hashes(root), indent=2) + "\n"
+    )
+    command = [
+        sys.executable, str(REPO / "scripts"
+                            / "fingerflex_linear_fusion.py"),
+        "fit", "--model", model, "--subject", subject,
+        "--fraction", str(fraction),
+    ]
+    if seed is not None:
+        command.extend(("--seed", str(seed)))
+    env = dict(os.environ)
+    if gpu is not None:
+        env["CUDA_VISIBLE_DEVICES"] = str(gpu)
+    else:
+        for name in (
+            "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+            "MKL_NUM_THREADS",
+        ):
+            env[name] = str(resources["cpu_threads_per_worker"])
+    _event(root, {
+        "state": "running", "model": model,
+        "subject": subject, "fraction": fraction,
+        "seed": seed, "gpu": gpu,
+        "attempt_id": attempt_id,
+        "attempt_log": str(attempt_log),
+    }, lock)
+    with attempt_log.open("w") as log:
+        completed = subprocess.run(
+            command, cwd=REPO, env=env, stdout=log,
+            stderr=subprocess.STDOUT, check=False,
+        )
+    state = (
+        "complete" if completed.returncode == 0
+        and (output / "result.json").is_file()
+        else "failed"
+    )
+    _event(root, {
+        "state": state, "model": model,
+        "subject": subject, "fraction": fraction,
+        "seed": seed, "gpu": gpu,
+        "exit_code": completed.returncode,
+        "attempt_id": attempt_id,
+        "attempt_log": str(attempt_log),
+    }, lock)
 
 
 def coordinate(
     kind: str, study: dict, roots: dict, resources: dict[str, int],
 ) -> None:
     """Run the configured parallel fits for one resource class."""
-    lock = threading.Lock()
+    comparison_parent = next(iter(roots.values())).parents[1]
+    matches = list((comparison_parent / "comparisons").glob(
+        study["name"] + "__*"
+    ))
+    if len(matches) != 1:
+        raise ValueError(
+            f"Expected one comparison root, got {matches}."
+        )
+    comparison = matches[0]
+    _register_progress(study, roots, comparison)
+    lock = threading.RLock()
     jobs: queue.Queue = queue.Queue()
     devices = (
         available_gpus(resources) if kind == "neural"
@@ -359,21 +431,46 @@ def coordinate(
             daemon=True,
         ) for gpu in devices
     ]
-    for thread in threads:
-        thread.start()
     models = NEURAL if kind == "neural" else LINEAR
+    with coordinator_scope(comparison, kind, models):
+        for thread in threads:
+            thread.start()
+        _dispatch_jobs(jobs, roots, lock, kind, study, models)
+        jobs.join()
+        for _ in threads:
+            jobs.put(None)
+        for thread in threads:
+            thread.join()
+
+
+def _dispatch_jobs(
+    jobs: queue.Queue, roots: dict[str, Path],
+    lock: threading.Lock, kind: str, study: dict,
+    models: tuple[str, ...],
+) -> None:
+    """Queue each selected fit and record retries at actual enqueue."""
     fractions = (0.5,) if kind == "neural" else study["fractions"]
     for model, fraction, subject in itertools.product(
         models, fractions, study["subjects"],
     ):
         seeds = study["seeds"] if kind == "neural" else (None,)
         for seed in seeds:
-            jobs.put((model, subject, fraction, seed))
-    jobs.join()
-    for _ in threads:
-        jobs.put(None)
-    for thread in threads:
-        thread.join()
+            marker = (
+                _job_path(roots[model], model, subject, fraction)
+                / (
+                    "deterministic" if seed is None
+                    else f"seed{seed}"
+                ) / "result.json"
+            )
+            if marker.is_file():
+                continue
+            with lock:
+                jobs.put((model, subject, fraction, seed))
+                _event(roots[model], {
+                    "state": "queued", "model": model,
+                    "subject": subject, "fraction": fraction,
+                    "seed": seed,
+                }, lock)
 
 
 def _session_command(

@@ -88,17 +88,18 @@ class GenericHpoTests(unittest.TestCase):
             ):
                 dispatch_jobs(
                     root, jobs, [7],
-                    lambda job, device: ("complete", 0),
+                    lambda job, device, log: ("complete", 0),
                 )
             records = [json.loads(line) for line in (
                 root / "status" / "jobs.jsonl"
             ).read_text().splitlines()]
             self.assertEqual(
                 [record["state"] for record in records],
-                ["running", "complete"],
+                ["queued", "running", "complete"],
             )
             self.assertTrue(all(
                 record["device"] == 7 for record in records
+                if record["state"] != "queued"
             ))
 
     def test_gpu_selection_uses_free_memory_and_capacity(self) -> None:
