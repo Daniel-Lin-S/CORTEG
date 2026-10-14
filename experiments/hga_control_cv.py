@@ -12,6 +12,7 @@ import itertools
 import json
 import uuid
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 import torch
@@ -77,7 +78,7 @@ def candidates(model: str, settings: dict,
     return valid, excluded
 
 
-def _unit_path(root: Path, candidate: int, seed: int | None,
+def cv_unit_path(root: Path, candidate: int, seed: int | None,
                fold: int) -> Path:
     """Locate one independently recoverable CV fit."""
     repeat = "deterministic" if seed is None else f"seed{seed}"
@@ -89,6 +90,7 @@ def select_branch(
     validation_x: np.ndarray, validation_y: np.ndarray,
     cv_root: Path, settings: dict, seeds: list[int],
     device: torch.device,
+    unit_resolver: Callable[[int, int | None, int], Path] | None = None,
 ) -> tuple[dict, dict[int | None, np.ndarray], dict]:
     """Select HGA settings by average fold/finger/seed correlation."""
     grid, excluded = candidates(
@@ -98,14 +100,20 @@ def select_branch(
         len(train_y), settings["folds"], settings["purge_rows"],
     )
     repeats = seeds if model in NEURAL_MODELS else [None]
-    score_grid = np.empty((len(grid), len(repeats), len(fold_rows)))
+    score_grid = np.empty((
+        len(grid), len(repeats), len(fold_rows),
+    ))
     predictions = {}
     for candidate_index, candidate in enumerate(grid):
         selected_oof = {}
         for repeat_index, seed in enumerate(repeats):
             oof = np.empty_like(train_y, dtype=np.float32)
             for fold, (training, held_out) in enumerate(fold_rows):
-                unit = _unit_path(cv_root, candidate_index, seed, fold)
+                unit = (
+                    cv_unit_path(cv_root, candidate_index, seed, fold)
+                    if unit_resolver is None
+                    else unit_resolver(candidate_index, seed, fold)
+                )
                 marker = unit / "score.json"
                 saved_prediction = unit / "prediction.npy"
                 if marker.is_file() and saved_prediction.is_file():
@@ -172,13 +180,15 @@ def select_branch(
             selected_oof[seed] = oof
         predictions[candidate_index] = selected_oof
     mean = score_grid.mean(axis=(1, 2))
-    chosen = int(np.argmax(mean))
+    chosen_index = int(np.argmax(mean))
     history = {
         "candidates": grid,
+        "candidate_indices": list(range(len(grid))),
         "excluded": excluded,
         "scores": score_grid.tolist(),
-        "selected_index": chosen,
+        "selected_index": chosen_index,
+        "selected_position": chosen_index,
         "selection": "mean_five_finger_pearson_over_folds_and_seeds",
         "ties": "configured_candidate_order",
     }
-    return grid[chosen], predictions[chosen], history
+    return grid[chosen_index], predictions[chosen_index], history

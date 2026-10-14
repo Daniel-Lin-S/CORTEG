@@ -143,4 +143,23 @@ def fit_semantics(base: dict, model: str,
 def fit_root(base: dict, model: str, settings: dict) -> Path:
     """Locate one model's stable semantic fit directory."""
     identifier = semantic_hash(fit_semantics(base, model, settings))
-    return Path(base["artifact_base"]) / "fits" / f"{model}__{identifier}"
+    parent = Path(base["artifact_base"]) / "fits"
+    candidate = parent / f"{model}__{identifier}"
+    aliases_path = parent / "semantic_aliases.json"
+    if aliases_path.is_file():
+        aliases = json.loads(aliases_path.read_text())
+        target = aliases.get(candidate.name)
+        if target is not None:
+            if Path(target).name != target or not (
+                target.startswith(f"{model}__")
+            ):
+                raise ValueError(
+                    f"Semantic alias is not a fit-root name: {target}."
+                )
+            resolved = parent / target
+            if not resolved.is_dir():
+                raise FileNotFoundError(
+                    f"Semantic alias target is missing: {resolved}."
+                )
+            return resolved
+    return candidate

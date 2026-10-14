@@ -157,8 +157,21 @@ def _process_start(pid: int) -> str | None:
     return stat.rsplit(") ", 1)[1].split()[19]
 
 
+def _pid_namespace(pid: int) -> str | None:
+    """Read a Linux PID namespace identity when it is visible."""
+    try:
+        return os.readlink(f"/proc/{pid}/ns/pid")
+    except (FileNotFoundError, PermissionError):
+        return None
+
+
 def _owner_alive(owner: dict) -> bool | None:
     """Classify a coordinator only when its identity is verifiable."""
+    expected_namespace = owner.get("pid_namespace")
+    if expected_namespace is not None and (
+        expected_namespace != _pid_namespace(os.getpid())
+    ):
+        return None
     current = _process_start(owner["pid"])
     if current == "unknown":
         return None
@@ -530,6 +543,7 @@ def coordinator_scope(campaign: Path, kind: str,
             _reconcile(folder, registry)
             entry["owners"][owner_id] = {
                 "pid": os.getpid(), "start_ticks": start,
+                "pid_namespace": _pid_namespace(os.getpid()),
                 "kind": kind, "models": list(models),
             }
             entry["state"] = "running"

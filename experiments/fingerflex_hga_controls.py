@@ -8,7 +8,9 @@ and one result.json completion marker per fit seed.
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
+from typing import Callable
 
 import joblib
 import numpy as np
@@ -20,7 +22,8 @@ from evaluation.regression import regression_metrics
 from experiments.fingerflex_campaign import split_fit_rows
 from experiments.fingerflex_ridge import _cross_validate, _refit
 from experiments.hga_control_cv import (
-    NEURAL_MODELS, SVR_MODEL, fit_branch, select_branch,
+    NEURAL_MODELS, SVR_MODEL, candidates, cv_unit_path,
+    fit_branch, select_branch,
 )
 from experiments.ridge_cv import convex_weights
 
@@ -31,6 +34,57 @@ FILTERBANK_MODELS = (
 NEW_MODELS = FILTERBANK_MODELS + (
     "cnn_gru_late", SVR_MODEL, "mlp_late",
 )
+
+
+def _quarantine_cv_unit(unit: Path, cv_root: Path) -> None:
+    """Move an incomplete CV unit aside before resuming."""
+    if not unit.exists():
+        return
+    quarantine = cv_root / "quarantine"
+    quarantine.mkdir(parents=True, exist_ok=True)
+    unit.rename(
+        quarantine / f"{unit.parent.name}_"
+        f"{unit.name}_{uuid.uuid4().hex}"
+    )
+
+
+def _legacy_cv_resolver(
+    model: str, settings: dict, cv_root: Path,
+    channels: int, timepoints: int,
+) -> tuple[
+    Callable[[int, int | None, int], Path] | None,
+    list[int] | None,
+]:
+    """Reuse completed old-grid units and isolate new CV units."""
+    previous_grid = settings.get("cnn_gru_legacy_grid")
+    if model != "cnn_gru_late" or previous_grid is None:
+        return None, None
+    current, _ = candidates(model, settings, channels, timepoints)
+    previous, _ = candidates(
+        model, {"cnn_gru": previous_grid}, channels, timepoints,
+    )
+    indices = [previous.index(candidate) for candidate in current]
+
+    def resolve(index: int, seed: int | None, fold: int) -> Path:
+        current_unit = cv_unit_path(
+            cv_root / "reduced_grid", index, seed, fold,
+        )
+        if (current_unit / "score.json").is_file() and (
+            current_unit / "prediction.npy"
+        ).is_file():
+            return current_unit
+        _quarantine_cv_unit(current_unit, cv_root)
+        old_unit = cv_unit_path(
+            cv_root, indices[index], seed, fold,
+        )
+        if (old_unit / "score.json").is_file() and (
+            old_unit / "prediction.npy"
+        ).is_file():
+            return old_unit
+        _quarantine_cv_unit(old_unit, cv_root)
+        return current_unit
+
+    return resolve, indices
 
 
 def fit_path(root: Path, model: str, fraction: float,
@@ -207,11 +261,18 @@ def fit_control(
     else:
         validation_x = high_train[validation]
         validation_y = arrays.train_y[validation]
+        resolver, legacy_indices = _legacy_cv_resolver(
+            model, settings, cv_root / "hga",
+            high_fit.shape[1], high_fit.shape[2],
+        )
         candidate, selected_oof, history = select_branch(
             model, high_fit, target,
             validation_x, validation_y,
             cv_root / "hga", settings, seeds, device,
+            unit_resolver=resolver,
         )
+        if legacy_indices is not None:
+            history["legacy_candidate_indices"] = legacy_indices
         high_selection = {"candidate": candidate, **history}
     identity = {
         "model": model, "subject": subject,

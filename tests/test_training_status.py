@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from infrastructure.training_lifecycle import (
+    _owner_alive,
     append_training_event,
     coordinator_scope,
     fit_task,
@@ -109,6 +110,22 @@ class TrainingStatusTests(unittest.TestCase):
                 )
                 self.assertFalse(errors[0]["queued_for_retry"])
                 self.assertTrue(errors[1]["queued_for_retry"])
+
+    def test_other_pid_namespace_does_not_mark_owner_dead(self) -> None:
+        """Treat an invisible host coordinator as unverifiable."""
+        owner = {
+            "pid": 12345,
+            "start_ticks": "42",
+            "pid_namespace": "pid:[host]",
+        }
+        with patch(
+            "infrastructure.training_lifecycle._pid_namespace",
+            return_value="pid:[sandbox]",
+        ), patch(
+            "infrastructure.training_lifecycle._process_start",
+            return_value=None,
+        ):
+            self.assertIsNone(_owner_alive(owner))
 
     def test_interrupted_coordinator_reconciles_once(self) -> None:
         """A vanished process leaves pending work and one error record."""

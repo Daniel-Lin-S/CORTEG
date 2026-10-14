@@ -18,8 +18,11 @@ from sklearn.multioutput import MultiOutputRegressor
 from sklearn.svm import SVR
 
 from evaluation.regression import regression_metrics
-from experiments.hga_control_cv import candidates, select_branch
+from experiments.hga_control_cv import (
+    candidates, select_branch,
+)
 from experiments.ridge_cv import convex_weights
+from experiments.fingerflex_hga_controls import _legacy_cv_resolver
 from models.hga_regressors import make_svr
 from preprocessing.channel_time_features import ChannelTimeScaler
 from preprocessing.naplib_filterbank import (
@@ -27,8 +30,12 @@ from preprocessing.naplib_filterbank import (
 )
 from plotting.fingerflex_comparison import _draw_curves
 from scripts.fingerflex_comparison import _check_alignment, _read_fit
-from scripts.fingerflex_hga_identity import fit_semantics, semantic_hash
-from scripts.fingerflex_hga_controls import _guard_attempt
+from scripts.fingerflex_hga_identity import (
+    fit_root, fit_semantics, semantic_hash,
+)
+from scripts.fingerflex_hga_controls import (
+    _fit_root_with_legacy_grid, _guard_attempt, _new_root,
+)
 
 
 def test_filterbank_component_and_time_boundaries() -> None:
@@ -82,6 +89,114 @@ def test_invalid_cnn_geometry_is_recorded() -> None:
         and item["candidate"]["conv_stride"] == 3
         for item in excluded
     )
+    configured = json.loads((
+        Path(__file__).parents[1]
+        / "configs/fingerflex_hga_controls.json"
+    ).read_text())
+    reduced, invalid = candidates(
+        "cnn_gru_late", configured, 2, 200,
+    )
+    assert len(reduced) == 9
+    assert not invalid
+    assert set(
+        item["conv_stride"] for item in reduced
+    ) == {2}
+    assert set(
+        item["drop_out"] for item in reduced
+    ) == {0.1, 0.3, 0.5}
+
+
+def test_cnn_resume_grid_reuses_original_cv_unit_indices(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reuse a saved fold and keep full-grid candidate IDs."""
+    grid = [
+        {
+            "n_convolution_layers": depth,
+            "conv_stride": 2,
+            "drop_out": 0.1,
+        }
+        for depth in (2, 3)
+    ]
+    def fake_candidates(
+        _model: str, settings: dict, *_args: object,
+    ) -> tuple[list[dict], list]:
+        return (
+            grid if len(settings["cnn_gru"]["depths"]) == 2
+            else [grid[1]], []
+        )
+
+    monkeypatch.setattr(
+        "experiments.hga_control_cv.candidates",
+        fake_candidates,
+    )
+    monkeypatch.setattr(
+        "experiments.fingerflex_hga_controls.candidates",
+        fake_candidates,
+    )
+    rows = np.arange(50, dtype=np.float32)
+    x = rows[:, None, None]
+    y = np.repeat(rows[:, None], 5, axis=1)
+    saved = tmp_path / "candidate1/seed0/fold0"
+    saved.mkdir(parents=True)
+    np.save(saved / "prediction.npy", y[:10])
+    (saved / "score.json").write_text(json.dumps({
+        "candidate": grid[1], "seed": 0, "fold": 0,
+        "training_rows": 40, "held_out_rows": 10,
+        "score": 1.0,
+    }))
+    partial = tmp_path / "reduced_grid/candidate0/seed0/fold1"
+    partial.mkdir(parents=True)
+    (partial / "checkpoint.tmp").write_text("incomplete")
+    called = []
+
+    def fake_fit(
+        model: str, candidate: dict, seed: int | None,
+        train_x: np.ndarray, train_y: np.ndarray,
+        validation_x: np.ndarray, validation_y: np.ndarray,
+        prediction_x: np.ndarray, output: Path,
+        settings: dict, device: torch.device,
+        persist_model: bool = True,
+    ) -> tuple[np.ndarray, dict]:
+        called.append(output)
+        output.mkdir(parents=True)
+        (output / "best.pt").write_bytes(b"checkpoint")
+        predicted = np.repeat(
+            prediction_x[:, 0, 0:1], 5, axis=1,
+        )
+        return predicted, {}
+
+    monkeypatch.setattr(
+        "experiments.hga_control_cv.fit_branch", fake_fit,
+    )
+    settings = {
+        "folds": 5, "purge_rows": 0,
+        "cnn_gru": {
+            "depths": [3], "strides": [2],
+            "dropouts": [0.1],
+        },
+        "cnn_gru_legacy_grid": {
+            "depths": [2, 3], "strides": [2],
+            "dropouts": [0.1],
+        },
+    }
+    resolver, indices = _legacy_cv_resolver(
+        "cnn_gru_late", settings, tmp_path, 1, 1,
+    )
+    candidate, oof, history = select_branch(
+        "cnn_gru_late", x, y, x[:10], y[:10], tmp_path,
+        settings, [0], torch.device("cpu"),
+        unit_resolver=resolver,
+    )
+    assert candidate == grid[1]
+    assert history["candidate_indices"] == [0]
+    assert indices == [1]
+    assert history["selected_index"] == 0
+    assert np.array_equal(oof[0], y)
+    assert len(called) == 4
+    assert all(path.parts[-3] == "candidate0" for path in called)
+    assert not (tmp_path / "candidate0").exists()
+    assert len(list((tmp_path / "quarantine").glob("*fold1*"))) == 1
 
 
 def test_cv_ties_and_incomplete_unit_recovery(
@@ -243,6 +358,69 @@ def test_semantic_identity_excludes_invocation_limits(
     assert semantic_hash(fit_semantics(base, "svr_late", source)) == baseline
     source["svr"]["C"] = [0.1, 1.0]
     assert semantic_hash(fit_semantics(base, "svr_late", source)) != baseline
+
+
+def test_cnn_reduced_grid_reuses_existing_fit_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep completed fits while recording the changed search grid."""
+    monkeypatch.setattr(
+        "scripts.fingerflex_hga_identity.preparation_id",
+        lambda base: "prepared",
+    )
+    monkeypatch.setattr(
+        "scripts.fingerflex_hga_controls.preparation_id",
+        lambda base: "prepared",
+    )
+    source = json.loads((
+        Path(__file__).parents[1]
+        / "configs/fingerflex_hga_controls.json"
+    ).read_text())
+    base = {"artifact_base": str(tmp_path)}
+    reduced = semantic_hash(fit_semantics(
+        base, "cnn_gru_late", source,
+    ))
+    previous = json.loads(json.dumps(source))
+    previous["cnn_gru"] = {
+        "depths": [2, 3, 4],
+        "strides": [2, 3],
+        "dropouts": [0, 0.1, 0.3, 0.5],
+    }
+    original = semantic_hash(fit_semantics(
+        base, "cnn_gru_late", previous,
+    ))
+    assert reduced != original
+    root = tmp_path / "fits" / f"cnn_gru_late__{original}"
+    root.mkdir(parents=True)
+    (root / "index.json").write_text(json.dumps({
+        "semantics": fit_semantics(base, "cnn_gru_late", previous),
+    }))
+    resolved, grid = _fit_root_with_legacy_grid(
+        base, source, "cnn_gru_late",
+    )
+    assert resolved == root
+    assert grid == previous["cnn_gru"]
+    (tmp_path / "fits/semantic_aliases.json").write_text(
+        json.dumps({f"cnn_gru_late__{reduced}": root.name})
+    )
+    assert fit_root(base, "cnn_gru_late", source) == root
+    aliased, grid = _fit_root_with_legacy_grid(
+        base, source, "cnn_gru_late",
+    )
+    assert aliased == root
+    assert grid == previous["cnn_gru"]
+    prepared = tmp_path / "preprocessing/prepared/subjects"
+    prepared.mkdir(parents=True)
+    assert _new_root(base, source, "cnn_gru_late") == root
+    version = (
+        root / "provenance/semantic_versions"
+        / f"{reduced}.json"
+    )
+    assert json.loads(version.read_text())["semantics"] == (
+        json.loads(json.dumps(fit_semantics(
+            base, "cnn_gru_late", source,
+        )))
+    )
 
 
 def test_explicit_feature_labels_in_legend() -> None:

@@ -8,8 +8,8 @@ The Gaussian spacing and analytic FFT response follow naplib-python's
 ``filterbank_hilbert`` implementation:
 https://github.com/naplab/naplib-python/blob/main/
 naplib/preprocessing/filter_hilbert.py
-Copyright (c) the naplib-python developers; MIT notice is retained in
-``preprocessing/naplib_LICENSE.txt``.
+Copyright (c) the naplib-python developers. Upstream MIT license:
+https://github.com/naplab/naplib-python/blob/main/LICENSE
 """
 from __future__ import annotations
 

@@ -8,6 +8,7 @@ training-log folder per group, attempt logs, and detached coordinators.
 from __future__ import annotations
 
 import argparse
+import copy
 import fcntl
 import itertools
 import json
@@ -69,8 +70,8 @@ SOURCES = (
     "models/hga_regressors.py",
     "models/temporal_spatial_cnn_gru.py",
     "preprocessing/naplib_filterbank.py",
-    "preprocessing/naplib_LICENSE.txt",
     "scripts/fingerflex_hga_controls.py",
+    "scripts/fingerflex_hga_identity.py",
 )
 
 
@@ -126,6 +127,47 @@ def _reference_root(base: dict, model: str) -> Path:
     return matches[0]
 
 
+def _fit_root_with_legacy_grid(
+    base: dict, study: dict, model: str,
+) -> tuple[Path, dict | None]:
+    """Reuse a unique completed CNN root whose only change is its grid."""
+    current = fit_root(base, model, study)
+    if model != "cnn_gru_late":
+        return current, None
+    target = json.loads(json.dumps(fit_semantics(base, model, study)))
+    if current.is_dir():
+        index = json.loads((current / "index.json").read_text())
+        previous = index["semantics"]
+        normalized = copy.deepcopy(previous)
+        normalized["neural"]["grid"] = study["cnn_gru"]
+        if normalized != target:
+            raise ValueError(
+                f"CNN-GRU fit root semantics differ: {current}."
+            )
+        return current, (
+            previous["neural"]["grid"]
+            if previous != target else None
+        )
+    parent = current.parent
+    matches = []
+    for index_path in parent.glob("cnn_gru_late__*/index.json"):
+        index = json.loads(index_path.read_text())
+        previous = index.get("semantics", {})
+        if "neural" not in previous:
+            continue
+        normalized = copy.deepcopy(previous)
+        normalized["neural"]["grid"] = study["cnn_gru"]
+        if normalized == target:
+            matches.append((index_path.parent, previous["neural"]["grid"]))
+    if not matches:
+        return current, None
+    if len(matches) != 1:
+        raise ValueError(
+            f"Expected one compatible CNN-GRU fit root, got {matches}."
+        )
+    return matches[0]
+
+
 def _new_root(base: dict, study: dict, model: str) -> Path:
     """Create one stable model root with fitting-only semantics."""
     root = fit_root(base, model, study)
@@ -144,7 +186,23 @@ def _new_root(base: dict, study: dict, model: str) -> Path:
         raise ValueError(f"Prepared link differs: {link}.")
     semantics = fit_semantics(base, model, study)
     identity = semantic_hash(semantics)
-    _save_once(root / "index.json", {
+    index_path = root / "index.json"
+    if index_path.is_file():
+        recorded = json.loads(index_path.read_text())
+        if recorded["semantics"] != json.loads(json.dumps(semantics)):
+            alias_path = root.parent / "semantic_aliases.json"
+            aliases = json.loads(alias_path.read_text())
+            if aliases.get(f"{model}__{identity}") != root.name:
+                raise ValueError(
+                    f"Fit semantics differ without an alias: {root}."
+                )
+            _save_once(
+                root / "provenance" / "semantic_versions"
+                / f"{identity}.json",
+                {"semantics": semantics, "study": study},
+            )
+            return root
+    _save_once(index_path, {
         "model": model, "semantic_id": identity,
         "preprocessing_id": preparation_id(base),
         "semantics": semantics,
@@ -154,7 +212,9 @@ def _new_root(base: dict, study: dict, model: str) -> Path:
         "source_campaign": study["source_campaign"],
         "preprocessing_id": preparation_id(base),
     })
-    _save_once(root / "provenance/resolved_study.json", study)
+    resolved_study = root / "provenance/resolved_study.json"
+    if not resolved_study.is_file():
+        _save_once(resolved_study, study)
     return root
 
 
@@ -250,7 +310,7 @@ def _settings(study: dict, resources: dict) -> dict:
         raise ValueError(
             "Local compute settings need a positive svr_cache_mib."
         )
-    return {
+    settings = {
         **study["selection"],
         "svr": study["svr"],
         "cnn_gru": study["cnn_gru"],
@@ -258,6 +318,7 @@ def _settings(study: dict, resources: dict) -> dict:
         "neural_training": study["neural_training"],
         "svr_cache_mib": resources["svr_cache_mib"],
     }
+    return settings
 
 
 def _seeds(model: str, study: dict) -> list[int | None]:
@@ -506,7 +567,9 @@ def main() -> None:
             args.fraction not in study["fractions"]
         ):
             raise ValueError("Fit model, subject, or fraction is invalid.")
-        root = fit_root(base, args.model, study)
+        root, legacy_grid = _fit_root_with_legacy_grid(
+            base, study, args.model,
+        )
         cache = filterbank_root(base, study)
         subject_cache = None
         if args.model in FILTERBANK_MODELS:
@@ -518,6 +581,8 @@ def main() -> None:
         settings = _settings(
             study, load_resources(args.local_resources),
         )
+        if legacy_grid is not None:
+            settings["cnn_gru_legacy_grid"] = legacy_grid
         fit_control(
             root / "prepared", args.model,
             args.subject, args.fraction,
