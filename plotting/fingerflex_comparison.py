@@ -67,11 +67,11 @@ AXIS_LABELS = {
 }
 DPI = 180
 SIGNIFICANCE = 0.05
-AXIS_FONT_SIZE = 14
-TICK_FONT_SIZE = 12
-TITLE_FONT_SIZE = 16
-LEGEND_FONT_SIZE = 12
-CELL_FONT_SIZE = 10
+AXIS_FONT_SIZE = 18
+TICK_FONT_SIZE = 16
+TITLE_FONT_SIZE = 21
+LEGEND_FONT_SIZE = 17
+CELL_FONT_SIZE = 13
 TEST_LABELS = {
     "exact_sign_flip": "exact sign-flip",
     "wilcoxon_signed_rank": "two-sided Wilcoxon",
@@ -198,7 +198,7 @@ def plot_subjects(root: Path, index: dict, summary: dict) -> None:
             index, summary, subject, metric,
         )
         figure, axis = plt.subplots(
-            figsize=(18, 7) if index.get("plot_labels") else (8.5, 5.0)
+            figsize=(16, 8) if index.get("plot_labels") else (8.5, 5.0)
         )
         _draw_curves(
             axis, fractions, mean, std, metric, _models(index),
@@ -231,7 +231,7 @@ def plot_aggregate(root: Path, index: dict, summary: dict) -> None:
     """Save equal-subject-weight curves with between-subject SD bands."""
     figure, axes = plt.subplots(
         1, len(METRICS),
-        figsize=(30, 8) if index.get("plot_labels") else (20, 6.0),
+        figsize=(25, 9) if index.get("plot_labels") else (20, 6.0),
     )
     for axis, metric in zip(axes, METRICS):
         subject_means = []
@@ -283,11 +283,11 @@ def plot_pair_matrix(root: Path, index: dict, summary: dict) -> None:
     detailed = bool(index.get("plot_labels"))
     figure, axes = plt.subplots(
         1, len(METRICS),
-        figsize=(34, max(9, 1.35 * len(pairs)))
+        figsize=(25, max(10, 1.6 * len(pairs)))
         if detailed else (20, 6.5),
-        constrained_layout=not detailed,
+        constrained_layout=True,
     )
-    for axis, metric in zip(axes, METRICS):
+    for metric_index, (axis, metric) in enumerate(zip(axes, METRICS)):
         effects = np.empty((len(pairs), len(fractions)))
         pvalues = np.empty_like(effects)
         for row, (first, second) in enumerate(pairs):
@@ -324,15 +324,16 @@ def plot_pair_matrix(root: Path, index: dict, summary: dict) -> None:
             range(len(fractions)),
             [f"{fraction:.0%}" for fraction in fractions],
         )
-        axis.set_yticks(
-            range(len(pairs)),
-            [
+        axis.set_yticks(range(len(pairs)))
+        if metric_index == 0:
+            axis.set_yticklabels([
                 f"{index['plot_labels'][first]}\n− "
                 f"{index['plot_labels'][second]}"
                 if detailed else f"{first} − {second}"
                 for first, second in pairs
-            ],
-        )
+            ])
+        else:
+            axis.tick_params(axis="y", left=False, labelleft=False)
         axis.set_xlabel(
             "Training proportion", fontsize=AXIS_FONT_SIZE,
         )
@@ -349,10 +350,8 @@ def plot_pair_matrix(root: Path, index: dict, summary: dict) -> None:
         + "Paired subject mean differences (first minus second); "
         f"{TEST_LABELS[test]} p, Holm across metrics within pair and "
         "fraction. * p < 0.05",
-        fontsize=TICK_FONT_SIZE,
+        fontsize=TITLE_FONT_SIZE,
     )
-    if detailed:
-        figure.subplots_adjust(left=0.39, right=0.98, top=0.9)
     output = root / "plots" / "paired_matrix.png"
     figure.savefig(output, dpi=DPI, bbox_inches="tight")
     plt.close(figure)

@@ -486,7 +486,18 @@ def _finish_owner(campaign: Path, owner_id: str,
         try:
             registry = _load_registry(folder)
             entry = registry["campaigns"][str(campaign.resolve())]
-            owner = entry["owners"].pop(owner_id)
+            owner = entry["owners"].pop(owner_id, None)
+            if owner is None:
+                _error(folder, {
+                    "time_utc": _now(),
+                    "event": "coordinator_owner_missing",
+                    "campaign": campaign.name,
+                    "reason": (
+                        "coordinator owner record was absent at finalization"
+                    ),
+                    "queued_for_retry": False,
+                })
+                owner = {"models": []}
             unfinished = sum(
                 not Path(task["marker"]).is_file()
                 for task in entry["tasks"].values()

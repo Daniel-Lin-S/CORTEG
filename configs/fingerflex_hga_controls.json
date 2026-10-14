@@ -128,17 +128,17 @@
     }
   },
   "plot_labels": {
-    "corteg": "CORTEG (LFS waveform + single-band HGA amplitude)",
+    "corteg": "CORTEG (LFS + single-band HGA)",
     "ridge_late":
-      "Ridge late fusion (LFS waveform + single-band HGA amplitude)",
+      "Ridge (LFS + single-band HGA)",
     "cnn_gru_late":
-      "CNN-GRU late fusion (LFS waveform + single-band HGA amplitude)",
+      "CNN-GRU (LFS + single-band HGA)",
     "svr_late":
-      "RBF-SVR late fusion (LFS waveform + single-band HGA amplitude)",
-    "mlp_late": "MLP late fusion (LFS waveform + single-band HGA amplitude)",
+      "RBF-SVR (LFS + single-band HGA)",
+    "mlp_late": "MLP (LFS + single-band HGA)",
     "ridge_filterbank_average_late":
-      "Ridge late fusion (LFS waveform + filterbank-averaged HGA amplitude)",
+      "Ridge (LFS + mean filterbank HGA)",
     "ridge_filterbank_bands_late":
-      "Ridge late fusion (LFS waveform + 11 filterbank HGA amplitudes)"
+      "Ridge (LFS + 11 filterbanks HGA)"
   }
 }

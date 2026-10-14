@@ -111,6 +111,41 @@ class TrainingStatusTests(unittest.TestCase):
                 self.assertFalse(errors[0]["queued_for_retry"])
                 self.assertTrue(errors[1]["queued_for_retry"])
 
+    def test_missing_owner_does_not_block_completed_report(self) -> None:
+        """Finalize completed work even if its owner record vanished."""
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            campaign = parent / "study__hash"
+            root = parent / "model__hash"
+            marker = root / "result.json"
+            log = parent / "logs" / "events.jsonl"
+            with patch("infrastructure.training_lifecycle.LOG", log):
+                register_campaign(campaign, [
+                    fit_task(
+                        root, marker, model="model", subject="bp",
+                        fraction=0.25, seed=0,
+                    ),
+                ])
+                with coordinator_scope(
+                    campaign, "cpu", ("model",),
+                ):
+                    registry = (
+                        log.parent / campaign.name / "registry.json"
+                    )
+                    saved = json.loads(registry.read_text())
+                    saved["campaigns"][str(campaign)]["owners"].clear()
+                    registry.write_text(json.dumps(saved))
+                    root.mkdir(parents=True)
+                    marker.write_text("{}")
+                status = refresh_status()["campaigns"][str(campaign)]
+                self.assertEqual(status["state"], "complete")
+                errors = [json.loads(line) for line in (
+                    log.parent / campaign.name / "errors.jsonl"
+                ).read_text().splitlines()]
+                self.assertEqual(
+                    errors[-1]["event"], "coordinator_owner_missing",
+                )
+
     def test_other_pid_namespace_does_not_mark_owner_dead(self) -> None:
         """Treat an invisible host coordinator as unverifiable."""
         owner = {
