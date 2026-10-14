@@ -32,6 +32,12 @@ In this way, changing the model doesn't require copying and pasting modules of o
 
 Models should be implemented and placed under `/home/lyh/codes/CORTEG/models`.
 
+## Experiment launch and hand-off
+
+Whenever you are asked to launch a compaign of experiments, please detach and leave it running after smoke test and confirming one fit works successfully.
+
+- DONT save artifacts on the one-fit audit.
+
 ## Break-point restoration
 
 All experiments should store artifacts immediately after the results of one fit (the smallest unit of experiment, e.g., be one neural or non-neural fitting of a single random seed) are obtained to avoid losing results of already completed runs. However, failed, invalid, or interrupted run artifacts should be removed or quanrantined in the next invocation, starting a fresh experiment on that fit.

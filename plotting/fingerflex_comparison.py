@@ -24,9 +24,13 @@ METRICS = ("pearson_r", "mse", "r2")
 SUPPORTED_MODELS = (
     "corteg", "hilo", "pls", "cnn_gru",
     "ridge_early", "ridge_late", "ridge_early_binned",
+    "cnn_gru_late", "svr_late", "mlp_late",
+    "ridge_filterbank_average_late", "ridge_filterbank_bands_late",
 )
 DETERMINISTIC_MODELS = (
     "pls", "ridge_early", "ridge_late", "ridge_early_binned",
+    "svr_late", "ridge_filterbank_average_late",
+    "ridge_filterbank_bands_late",
 )
 LABELS = {
     "corteg": "CORTEG (ST-EEGFormer-small)",
@@ -36,6 +40,11 @@ LABELS = {
     "ridge_early": "Ridge (early fusion)",
     "ridge_late": "Ridge (late fusion)",
     "ridge_early_binned": "Temporal binning (CV selected)",
+    "cnn_gru_late": "CNN-GRU late fusion",
+    "svr_late": "RBF-SVR late fusion",
+    "mlp_late": "MLP late fusion",
+    "ridge_filterbank_average_late": "Filterbank-average ridge late fusion",
+    "ridge_filterbank_bands_late": "Filterbank-bands ridge late fusion",
 }
 STYLES = {
     "corteg": ("#0072B2", "o"),
@@ -45,6 +54,11 @@ STYLES = {
     "ridge_early": ("#E69F00", "v"),
     "ridge_late": ("#56B4E9", "P"),
     "ridge_early_binned": ("#0072B2", "o"),
+    "cnn_gru_late": ("#CC79A7", "D"),
+    "svr_late": ("#E69F00", "v"),
+    "mlp_late": ("#009E73", "^"),
+    "ridge_filterbank_average_late": ("#E69F00", "v"),
+    "ridge_filterbank_bands_late": ("#009E73", "^"),
 }
 AXIS_LABELS = {
     "pearson_r": "Mean finger Pearson r",
@@ -141,14 +155,18 @@ def _draw_curves(
     std: np.ndarray,
     metric: str,
     models: tuple[str, ...],
+    labels: dict[str, str] | None = None,
 ) -> None:
     """Draw reusable model lines with available SD bands."""
+    labels = {} if labels is None else labels
     for index, model in enumerate(models):
         color, marker = STYLES[model]
         label = (
             "No temporal binning" if model == "ridge_early"
             else LABELS[model]
-        ) if set(models) == BINNING_MODELS else LABELS[model]
+        ) if set(models) == BINNING_MODELS else labels.get(
+            model, LABELS[model],
+        )
         if np.isnan(std[index]).all():
             axis.plot(
                 fractions, mean[index], color=color, marker=marker,
@@ -179,9 +197,12 @@ def plot_subjects(root: Path, index: dict, summary: dict) -> None:
         fractions, mean, std = _model_arrays(
             index, summary, subject, metric,
         )
-        figure, axis = plt.subplots(figsize=(8.5, 5.0))
+        figure, axis = plt.subplots(
+            figsize=(18, 7) if index.get("plot_labels") else (8.5, 5.0)
+        )
         _draw_curves(
             axis, fractions, mean, std, metric, _models(index),
+            index.get("plot_labels", {}),
         )
         title = _study_title(index)
         axis.set_title(
@@ -192,10 +213,14 @@ def plot_subjects(root: Path, index: dict, summary: dict) -> None:
         handles, labels = axis.get_legend_handles_labels()
         figure.legend(
             handles, labels, loc="center left",
-            bbox_to_anchor=(0.74, 0.5), fontsize=LEGEND_FONT_SIZE,
+            bbox_to_anchor=(
+                0.58 if index.get("plot_labels") else 0.74, 0.5,
+            ), fontsize=LEGEND_FONT_SIZE,
             frameon=False,
         )
-        figure.tight_layout(rect=(0, 0, 0.74, 1))
+        figure.tight_layout(rect=(
+            0, 0, 0.58 if index.get("plot_labels") else 0.74, 1,
+        ))
         output = root / "plots" / "subjects" / subject / f"{metric}.png"
         output.parent.mkdir(parents=True, exist_ok=True)
         figure.savefig(output, dpi=DPI, bbox_inches="tight")
@@ -204,7 +229,10 @@ def plot_subjects(root: Path, index: dict, summary: dict) -> None:
 
 def plot_aggregate(root: Path, index: dict, summary: dict) -> None:
     """Save equal-subject-weight curves with between-subject SD bands."""
-    figure, axes = plt.subplots(1, len(METRICS), figsize=(20, 6.0))
+    figure, axes = plt.subplots(
+        1, len(METRICS),
+        figsize=(30, 8) if index.get("plot_labels") else (20, 6.0),
+    )
     for axis, metric in zip(axes, METRICS):
         subject_means = []
         for subject in index["subjects"]:
@@ -218,6 +246,7 @@ def plot_aggregate(root: Path, index: dict, summary: dict) -> None:
         _draw_curves(
             axis, fractions, values.mean(axis=0),
             values.std(axis=0, ddof=1), metric, _models(index),
+            index.get("plot_labels", {}),
         )
         axis.set_title(AXIS_LABELS[metric], fontsize=TITLE_FONT_SIZE)
         if metric == "mse":
@@ -229,7 +258,9 @@ def plot_aggregate(root: Path, index: dict, summary: dict) -> None:
     handles, labels = axes[0].get_legend_handles_labels()
     figure.legend(
         handles, labels, loc="center left",
-        bbox_to_anchor=(0.79, 0.5), fontsize=LEGEND_FONT_SIZE,
+        bbox_to_anchor=(
+            0.73 if index.get("plot_labels") else 0.79, 0.5,
+        ), fontsize=LEGEND_FONT_SIZE,
         frameon=False,
     )
     figure.text(
@@ -237,7 +268,9 @@ def plot_aggregate(root: Path, index: dict, summary: dict) -> None:
         "Equal weight per subject; bands show SD across subject seed means.",
         ha="center", fontsize=TICK_FONT_SIZE,
     )
-    figure.tight_layout(rect=(0, 0.09, 0.79, 1))
+    figure.tight_layout(rect=(
+        0, 0.09, 0.73 if index.get("plot_labels") else 0.79, 1,
+    ))
     output = root / "plots" / "aggregate.png"
     figure.savefig(output, dpi=DPI, bbox_inches="tight")
     plt.close(figure)
@@ -247,9 +280,12 @@ def plot_pair_matrix(root: Path, index: dict, summary: dict) -> None:
     """Save paired effect and Holm p-value matrices for each metric."""
     pairs = list(itertools.combinations(_models(index), 2))
     fractions = sorted(index["fractions"])
+    detailed = bool(index.get("plot_labels"))
     figure, axes = plt.subplots(
-        1, len(METRICS), figsize=(20, 6.5),
-        constrained_layout=True,
+        1, len(METRICS),
+        figsize=(34, max(9, 1.35 * len(pairs)))
+        if detailed else (20, 6.5),
+        constrained_layout=not detailed,
     )
     for axis, metric in zip(axes, METRICS):
         effects = np.empty((len(pairs), len(fractions)))
@@ -290,7 +326,12 @@ def plot_pair_matrix(root: Path, index: dict, summary: dict) -> None:
         )
         axis.set_yticks(
             range(len(pairs)),
-            [f"{first} − {second}" for first, second in pairs],
+            [
+                f"{index['plot_labels'][first]}\n− "
+                f"{index['plot_labels'][second]}"
+                if detailed else f"{first} − {second}"
+                for first, second in pairs
+            ],
         )
         axis.set_xlabel(
             "Training proportion", fontsize=AXIS_FONT_SIZE,
@@ -310,6 +351,8 @@ def plot_pair_matrix(root: Path, index: dict, summary: dict) -> None:
         "fraction. * p < 0.05",
         fontsize=TICK_FONT_SIZE,
     )
+    if detailed:
+        figure.subplots_adjust(left=0.39, right=0.98, top=0.9)
     output = root / "plots" / "paired_matrix.png"
     figure.savefig(output, dpi=DPI, bbox_inches="tight")
     plt.close(figure)

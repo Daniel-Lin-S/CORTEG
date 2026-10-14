@@ -14,6 +14,7 @@ RESOURCE_KEYS = (
     "gpu_workers", "cpu_workers", "cpu_threads_per_worker",
     "min_gpu_free_mib",
 )
+SVR_CACHE_KEY = "svr_cache_mib"
 
 
 def load_resources(path: Path) -> dict[str, int]:
@@ -23,10 +24,13 @@ def load_resources(path: Path) -> dict[str, int]:
             f"Local compute configuration is missing: {path}."
         )
     values = json.loads(path.read_text())
-    if set(values) != set(RESOURCE_KEYS):
+    allowed = (set(RESOURCE_KEYS), set(RESOURCE_KEYS) | {
+        SVR_CACHE_KEY,
+    })
+    if set(values) not in allowed:
         raise ValueError(
-            f"Expected compute keys {RESOURCE_KEYS}, got "
-            f"{sorted(values)}."
+            f"Expected compute keys {RESOURCE_KEYS} with optional "
+            f"{SVR_CACHE_KEY}, got {sorted(values)}."
         )
     for key, value in values.items():
         if type(value) is not int or value <= 0:

@@ -1,0 +1,146 @@
+{
+  "name": "stanford_finger_hga_controls",
+  "source_campaign": "configs/fingerflex_campaign.json",
+  "subjects": [
+    "bp",
+    "cc",
+    "ht",
+    "jc",
+    "jp",
+    "mv",
+    "wc",
+    "wm",
+    "zt"
+  ],
+  "fractions": [
+    0.25,
+    0.5,
+    1.0
+  ],
+  "seeds": [
+    0,
+    1,
+    2
+  ],
+  "filterbank": {
+    "low_hz": 70,
+    "high_hz": 200,
+    "components": 11,
+    "timepoints": 200,
+    "window_samples": 1000,
+    "sample_hz": 1000,
+    "recipe": "naplib_gaussian_per_window_envelope_then_mean5_v1"
+  },
+  "selection": {
+    "folds": 5,
+    "purge_rows": 25,
+    "alpha_per_training_row": [
+      0.0001,
+      0.001,
+      0.01,
+      0.1,
+      1,
+      10,
+      100
+    ],
+    "metric": "mean_five_finger_pearson_r",
+    "neural_ties": "candidate_order",
+    "ridge_ties": "stronger_alpha"
+  },
+  "svr": {
+    "C": [
+      0.1,
+      1,
+      10
+    ],
+    "gamma_factors": [
+      0.1,
+      1,
+      10
+    ],
+    "epsilon": 0.1
+  },
+  "cnn_gru": {
+    "depths": [
+      2,
+      3,
+      4
+    ],
+    "strides": [
+      2,
+      3
+    ],
+    "dropouts": [
+      0,
+      0.1,
+      0.3,
+      0.5
+    ]
+  },
+  "mlp": {
+    "hidden_widths": [
+      128,
+      256,
+      512
+    ],
+    "dropouts": [
+      0.1,
+      0.25,
+      0.5
+    ]
+  },
+  "neural_training": {
+    "epochs": 200,
+    "patience": 30,
+    "batch_size": 128,
+    "base_lr": 0.001,
+    "weight_decay": 0.005,
+    "warmup_epochs": 10,
+    "min_lr": 1e-05
+  },
+  "comparison": {
+    "metrics": [
+      "pearson_r",
+      "mse",
+      "r2"
+    ],
+    "paired_unit": "subject",
+    "test": "wilcoxon_signed_rank",
+    "holm_family": "metrics_within_pair_and_fraction"
+  },
+  "groups": {
+    "hga_models": {
+      "name": "stanford_finger_hga_model_alternatives",
+      "models": [
+        "corteg",
+        "ridge_late",
+        "cnn_gru_late",
+        "svr_late",
+        "mlp_late"
+      ]
+    },
+    "filterbank": {
+      "name": "stanford_finger_filterbank_hga",
+      "models": [
+        "corteg",
+        "ridge_late",
+        "ridge_filterbank_average_late",
+        "ridge_filterbank_bands_late"
+      ]
+    }
+  },
+  "plot_labels": {
+    "corteg": "CORTEG (LFS waveform + single-band HGA amplitude)",
+    "ridge_late":
+      "Ridge late fusion (LFS waveform + single-band HGA amplitude)",
+    "cnn_gru_late":
+      "CNN-GRU late fusion (LFS waveform + single-band HGA amplitude)",
+    "svr_late":
+      "RBF-SVR late fusion (LFS waveform + single-band HGA amplitude)",
+    "mlp_late": "MLP late fusion (LFS waveform + single-band HGA amplitude)",
+    "ridge_filterbank_average_late":
+      "Ridge late fusion (LFS waveform + filterbank-averaged HGA amplitude)",
+    "ridge_filterbank_bands_late":
+      "Ridge late fusion (LFS waveform + 11 filterbank HGA amplitudes)"
+  }
+}

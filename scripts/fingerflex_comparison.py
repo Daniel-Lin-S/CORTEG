@@ -33,9 +33,13 @@ METRICS = ("pearson_r", "mse", "r2")
 SUPPORTED_MODELS = (
     "corteg", "hilo", "pls", "cnn_gru",
     "ridge_early", "ridge_late", "ridge_early_binned",
+    "cnn_gru_late", "svr_late", "mlp_late",
+    "ridge_filterbank_average_late", "ridge_filterbank_bands_late",
 )
 DETERMINISTIC_MODELS = (
     "pls", "ridge_early", "ridge_late", "ridge_early_binned",
+    "svr_late", "ridge_filterbank_average_late",
+    "ridge_filterbank_bands_late",
 )
 COMPARISON_VERSION = "paired_subject_wilcoxon_v1"
 SIGN_FLIP_VERSION = "paired_subject_exact_sign_flip_v1"
@@ -136,6 +140,7 @@ def ensure_comparison(
         "subjects": study["subjects"],
         "fractions": study["fractions"],
         "seeds": study["seeds"],
+        "plot_labels": study.get("plot_labels", {}),
     }
     path = root / "index.json"
     if path.exists():
@@ -143,6 +148,8 @@ def ensure_comparison(
         for key in ("semantic_id", "semantics", "fit_roots"):
             if saved[key] != index[key]:
                 raise ValueError(f"Comparison identity conflict: {path}.")
+        if saved.get("plot_labels", {}) != index["plot_labels"]:
+            raise ValueError(f"Comparison labels differ: {path}.")
         for key in ("subjects", "fractions", "seeds"):
             previous = saved[key]
             saved[key] = list(dict.fromkeys(previous + index[key]))

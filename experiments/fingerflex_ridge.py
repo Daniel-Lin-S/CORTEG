@@ -9,6 +9,7 @@ The result marker is written last so interrupted fits can be quarantined.
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 
 import joblib
@@ -32,8 +33,9 @@ SELECTION_METRIC = "five_blocked_fold_mean_finger_pearson_r"
 def _cross_validate(
     sources: tuple[np.ndarray, ...],
     target: np.ndarray,
+    unit_root: Path | None = None,
 ) -> tuple[float, np.ndarray, list[dict]]:
-    """Apply the CV strategy to scaled ridge stream designs."""
+    """Apply blocked ridge CV and optionally persist each fold fit."""
     predictions = np.empty(
         (len(ALPHA_PER_ROW), len(target), target.shape[1]),
         dtype=np.float32,
@@ -46,13 +48,66 @@ def _cross_validate(
             tuple(source[held_out] for source in sources),
         )
         for index, ratio in enumerate(ALPHA_PER_ROW):
-            estimator = make_ridge(ratio * len(training))
-            estimator.fit(x_train, target[training])
-            predicted = estimator.predict(x_held)
+            unit = (
+                unit_root / f"candidate{index}" / f"fold{fold}"
+                if unit_root is not None else None
+            )
+            marker = unit / "score.json" if unit else None
+            saved = unit / "prediction.npy" if unit else None
+            if marker is not None and marker.is_file() and (
+                saved.is_file()
+            ):
+                record = json.loads(marker.read_text())
+                expected = {
+                    "alpha_per_training_row": ratio,
+                    "fold": fold,
+                    "training_rows": len(training),
+                    "held_out_rows": len(held_out),
+                }
+                if any(
+                    record.get(key) != value
+                    for key, value in expected.items()
+                ):
+                    raise ValueError(f"CV unit identity differs: {marker}.")
+                predicted = np.load(saved)
+                if predicted.shape != target[held_out].shape:
+                    raise ValueError(
+                        f"CV prediction shape differs: {saved}."
+                    )
+                score = finger_correlations(
+                    target[held_out], predicted,
+                ).mean()
+                if not np.isclose(score, record["score"]):
+                    raise ValueError(
+                        f"CV score differs from predictions: {marker}."
+                    )
+            else:
+                if unit is not None:
+                    if unit.exists():
+                        quarantine = unit_root / "quarantine"
+                        quarantine.mkdir(parents=True, exist_ok=True)
+                        unit.rename(
+                            quarantine / f"{unit.parent.name}_"
+                            f"{unit.name}_{uuid.uuid4().hex}"
+                        )
+                    unit.mkdir(parents=True, exist_ok=True)
+                estimator = make_ridge(ratio * len(training))
+                estimator.fit(x_train, target[training])
+                predicted = estimator.predict(x_held)
+                score = finger_correlations(
+                    target[held_out], predicted,
+                ).mean()
+                if unit is not None:
+                    np.save(saved, predicted.astype(np.float32))
+                    marker.write_text(json.dumps({
+                        "alpha_per_training_row": ratio,
+                        "fold": fold,
+                        "training_rows": len(training),
+                        "held_out_rows": len(held_out),
+                        "score": float(score),
+                    }, indent=2) + "\n")
             predictions[index, held_out] = predicted
-            fold_scores[index, fold] = finger_correlations(
-                target[held_out], predicted,
-            ).mean()
+            fold_scores[index, fold] = score
         history.append({
             "fold": fold,
             "train_rows": len(training),
