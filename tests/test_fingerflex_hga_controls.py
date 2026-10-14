@@ -105,9 +105,11 @@ def test_cv_ties_and_incomplete_unit_recovery(
         val_x: np.ndarray, val_y: np.ndarray,
         prediction_x: np.ndarray, output: Path,
         settings: dict, device: torch.device,
+        persist_model: bool = True,
     ) -> tuple[np.ndarray, dict]:
         output.mkdir(parents=True, exist_ok=True)
-        joblib.dump({}, output / "best.joblib")
+        if persist_model:
+            joblib.dump({}, output / "best.joblib")
         predicted = np.repeat(
             prediction_x[:, 0, :1], 5, axis=1,
         )
@@ -131,6 +133,7 @@ def test_cv_ties_and_incomplete_unit_recovery(
     assert history["selected_index"] == 0
     assert np.array_equal(oof[None], y)
     assert list((tmp_path / "quarantine").iterdir())
+    assert not list(tmp_path.glob("candidate*/**/best.joblib"))
     chosen_again, _, _ = select_branch(
         "svr_late", x, y, validation_x, validation_y,
         tmp_path, settings, [], torch.device("cpu"),

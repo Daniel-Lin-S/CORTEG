@@ -149,15 +149,14 @@ def select_branch(
                         train_x[training], train_y[training],
                         validation_x, validation_y,
                         train_x[held_out], unit, settings, device,
+                        persist_model=model != SVR_MODEL,
                     )
                     score = float(finger_correlations(
                         train_y[held_out], predicted,
                     ).mean())
                     np.save(saved_prediction, predicted)
-                    checkpoint = unit / (
-                        "best.joblib" if model == SVR_MODEL else "best.pt"
-                    )
-                    checkpoint.unlink()
+                    if model != SVR_MODEL:
+                        (unit / "best.pt").unlink()
                     marker.write_text(json.dumps({
                         "candidate": candidate,
                         "seed": seed, "fold": fold,

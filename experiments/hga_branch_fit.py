@@ -80,6 +80,7 @@ def fit_branch(
     validation_y: np.ndarray | None,
     prediction_x: np.ndarray, output: Path,
     settings: dict, device: torch.device,
+    persist_model: bool = True,
 ) -> tuple[np.ndarray, dict]:
     """Fit one HGA branch using only supplied training rows for scaling.
 
@@ -90,6 +91,9 @@ def fit_branch(
         CV held-out or final test windows.
     train_y, validation_y : ndarray, shape (N,5)
         Corresponding raw finger targets.
+    persist_model : bool, optional
+        Save the fitted SVR for final inference. Default True. CV units
+        need only predictions and scores.
 
     Returns
     -------
@@ -113,8 +117,11 @@ def fit_branch(
         )
         estimator.fit(design, (train_y - mean) / std)
         prediction = estimator.predict(predict_design) * std + mean
-        joblib.dump(estimator, output / "best.joblib")
-        diagnostics = {"checkpoint": "best.joblib"}
+        if persist_model:
+            joblib.dump(estimator, output / "best.joblib")
+        diagnostics = {
+            "checkpoint": "best.joblib" if persist_model else None,
+        }
     else:
         if seed is None or validation_x is None or validation_y is None:
             raise ValueError("Neural fit needs seed and validation rows.")
