@@ -16,8 +16,9 @@ import joblib
 import numpy as np
 import torch
 
-from data.fingerflex_filterbank import load_filterbank
-from data.fingerflex_linear import load_fingerflex_linear
+from preprocessing.fingerflex_filterbank_cache import load_filterbank
+from data.fingerflex.spectral_streams import load_spectral_streams
+from data.fingerflex.targets import target_boundaries
 from evaluation.regression import regression_metrics
 from experiments.fingerflex_campaign import split_fit_rows
 from experiments.fingerflex_ridge import _cross_validate, _refit
@@ -109,8 +110,8 @@ def _hga_arrays(arrays: object, model: str,
     else:
         training = arrays.train_high_gamma
         testing = arrays.test_high_gamma
-    if len(training) != len(arrays.train_y) or (
-        len(testing) != len(arrays.test_y)
+    if len(training) != len(arrays.targets.train_y) or (
+        len(testing) != len(arrays.targets.test_y)
     ):
         raise ValueError("HGA and target row counts differ.")
     return training, testing
@@ -227,10 +228,10 @@ def fit_control(
          / "result.json").is_file() for seed in repeats
     ):
         return
-    arrays = load_fingerflex_linear(prepared, subject)
+    arrays = load_spectral_streams(prepared, subject)
     high_train, high_test = _hga_arrays(arrays, model, cache)
-    fit, validation = split_fit_rows(len(arrays.train_y), fraction)
-    target = arrays.train_y[fit]
+    fit, validation = split_fit_rows(len(arrays.targets.train_y), fraction)
+    target = arrays.targets.train_y[fit]
     lfs_fit = arrays.train_broadband[fit]
     high_fit = high_train[fit]
     cv_root = (
@@ -260,7 +261,7 @@ def fit_control(
         selected_oof = {None: high_oof}
     else:
         validation_x = high_train[validation]
-        validation_y = arrays.train_y[validation]
+        validation_y = arrays.targets.train_y[validation]
         resolver, legacy_indices = _legacy_cv_resolver(
             model, settings, cv_root / "hga",
             high_fit.shape[1], high_fit.shape[2],
@@ -277,7 +278,7 @@ def fit_control(
     identity = {
         "model": model, "subject": subject,
         "fraction": fraction, "delay_ms": 0,
-        "boundaries": arrays.boundaries(fit, validation),
+        "boundaries": target_boundaries(arrays.targets, fit, validation),
     }
     for seed in repeats:
         output = fit_path(root, model, fraction, subject, seed)
@@ -300,7 +301,7 @@ def fit_control(
             prediction, _ = fit_branch(
                 model, candidate, seed,
                 high_fit, target,
-                high_train[validation], arrays.train_y[validation],
+                high_train[validation], arrays.targets.train_y[validation],
                 high_test, output, settings, device,
             )
             fitted_high = (
@@ -312,5 +313,5 @@ def fit_control(
             low_model, low_scalers[0], low_selection,
             high_selection, selected_oof[seed], low_oof,
             low_test, prediction,
-            target, arrays.test_y, fitted_high,
+            target, arrays.targets.test_y, fitted_high,
         )

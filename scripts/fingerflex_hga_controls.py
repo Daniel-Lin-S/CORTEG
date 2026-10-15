@@ -31,7 +31,7 @@ if str(REPO) not in sys.path:
 from data.fingerflex_cache import (
     preparation_id, resolve_campaign, sha256_file,
 )
-from data.fingerflex_filterbank import cache_subject
+from preprocessing.fingerflex_filterbank_cache import cache_subject
 from experiments.fingerflex_hga_controls import (
     FILTERBANK_MODELS, NEW_MODELS, fit_control, fit_path,
 )

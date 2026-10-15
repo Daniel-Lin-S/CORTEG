@@ -12,7 +12,8 @@ from pathlib import Path
 import numpy as np
 
 from preprocessing.channel_time_features import transform_streams
-from data.fingerflex_linear import load_fingerflex_linear
+from data.fingerflex.spectral_streams import load_spectral_streams
+from data.fingerflex.targets import target_boundaries
 from preprocessing.temporal_bins import mean_time_bins
 from evaluation.regression import finger_correlations
 from experiments.fingerflex_campaign import split_fit_rows
@@ -88,9 +89,9 @@ def fit_binned_ridge(
     """Fit, score, and save one deterministic binned early ridge."""
     if (output / "result.json").is_file():
         return
-    arrays = load_fingerflex_linear(prepared, subject)
-    fit, validation = split_fit_rows(len(arrays.train_y), fraction)
-    target = arrays.train_y[fit]
+    arrays = load_spectral_streams(prepared, subject)
+    fit, validation = split_fit_rows(len(arrays.targets.train_y), fraction)
+    target = arrays.targets.train_y[fit]
     sources = (
         arrays.train_broadband[fit], arrays.train_high_gamma[fit],
     )
@@ -109,7 +110,7 @@ def fit_binned_ridge(
         "fraction": fraction,
         "seed": None,
         "delay_ms": 0,
-        "boundaries": arrays.boundaries(fit, validation),
+        "boundaries": target_boundaries(arrays.targets, fit, validation),
         "selected_bin_count": bins,
         "selected_bin_duration_ms": WINDOW_MS / bins,
     }
@@ -117,5 +118,5 @@ def fit_binned_ridge(
     _save_fit(
         output, model, {"joint": x_test},
         {"selected": {"joint": ratio}, "history": history},
-        scalers, target, arrays.test_y, identity,
+        scalers, target, arrays.targets.test_y, identity,
     )

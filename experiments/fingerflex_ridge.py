@@ -16,7 +16,8 @@ import joblib
 import numpy as np
 
 from preprocessing.channel_time_features import transform_streams
-from data.fingerflex_linear import load_fingerflex_linear
+from data.fingerflex.spectral_streams import load_spectral_streams
+from data.fingerflex.targets import target_boundaries
 from experiments.fingerflex_campaign import split_fit_rows
 from evaluation.regression import (
     finger_correlations, regression_metrics,
@@ -245,9 +246,9 @@ def fit_ridge(
         raise ValueError(f"Unknown ridge model: {model_name}.")
     if (output / "result.json").is_file():
         return
-    arrays = load_fingerflex_linear(prepared, subject)
-    fit, validation = split_fit_rows(len(arrays.train_y), fraction)
-    target = arrays.train_y[fit]
+    arrays = load_spectral_streams(prepared, subject)
+    fit, validation = split_fit_rows(len(arrays.targets.train_y), fraction)
+    target = arrays.targets.train_y[fit]
     training = (
         arrays.train_broadband[fit], arrays.train_high_gamma[fit],
     )
@@ -266,10 +267,10 @@ def fit_ridge(
         "fraction": fraction,
         "seed": None,
         "delay_ms": 0,
-        "boundaries": arrays.boundaries(fit, validation),
+        "boundaries": target_boundaries(arrays.targets, fit, validation),
     }
     output.mkdir(parents=True, exist_ok=True)
     _save_fit(
         output, model, designs, selection, scalers,
-        target, arrays.test_y, identity,
+        target, arrays.targets.test_y, identity,
     )

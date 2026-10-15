@@ -1,5 +1,5 @@
 {
-  "adapter": "data.fingerflex_cnn_gru_hpo_adapter",
+  "adapter": "scripts.fingerflex_cnn_gru_hpo_adapter",
   "name": "stanford_finger_cnn_gru_grid_0ms",
   "source_fits": "configs/fingerflex_four_models.json",
   "reference_comparison": "configs/fingerflex_three_model_comparison.json",

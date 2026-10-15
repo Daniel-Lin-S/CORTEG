@@ -127,6 +127,14 @@
       ]
     }
   },
+  "prediction_examples": {
+    "sampling_seed": 20261014,
+    "subject_count": 4,
+    "intervals_per_subject": 2,
+    "duration_seconds": 5,
+    "training_fraction": 1.0,
+    "neural_seed": 0
+  },
   "plot_labels": {
     "corteg": "CORTEG (LFS + single-band HGA)",
     "ridge_late":

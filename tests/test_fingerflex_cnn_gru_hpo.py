@@ -18,7 +18,7 @@ from experiments.fingerflex_campaign import (
     _load_arrays, parameter_groups,
 )
 from models.temporal_spatial_cnn_gru import TemporalSpatialCNNGRU
-from data.fingerflex_cnn_gru_hpo_adapter import (
+from scripts.fingerflex_cnn_gru_hpo_adapter import (
     DEFAULT_ARCHITECTURE, architecture_grid, architecture_key,
     pending_jobs, select,
 )
@@ -125,13 +125,13 @@ class CnnGruHpoTests(unittest.TestCase):
                 },
             }))
             with patch(
-                "data.fingerflex_cnn_gru_hpo_adapter.selection_scores",
+                "scripts.fingerflex_cnn_gru_hpo_adapter.selection_scores",
                 return_value={first: 0.4, second: 0.4},
             ):
                 winner = select(root, {"selection": {"seed": 0}})
             self.assertEqual(winner["candidate"], first)
             with patch(
-                "data.fingerflex_cnn_gru_hpo_adapter.selection_scores",
+                "scripts.fingerflex_cnn_gru_hpo_adapter.selection_scores",
                 side_effect=AssertionError("Selection was recomputed."),
             ):
                 self.assertEqual(
