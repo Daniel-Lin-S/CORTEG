@@ -1,0 +1,32 @@
+{
+  "name": "stanford_finger_corteg_cnn_gru_hga_lfs",
+  "source_campaign": "configs/fingerflex_campaign.json",
+  "subjects": ["bp", "cc", "ht", "jc", "jp", "mv", "wc", "wm", "zt"],
+  "fractions": [0.25, 0.5, 1.0],
+  "seeds": [0, 1, 2],
+  "models": ["corteg", "cnn_gru", "cnn_gru_late"],
+  "source_comparisons": {
+    "corteg": "stanford_finger_hga_model_alternatives",
+    "cnn_gru": "stanford_finger_four_models_0ms",
+    "cnn_gru_late": "stanford_finger_hga_model_alternatives"
+  },
+  "comparison": {
+    "metrics": ["pearson_r", "mse", "r2"],
+    "paired_unit": "subject",
+    "test": "wilcoxon_signed_rank",
+    "holm_family": "metrics_within_pair_and_fraction"
+  },
+  "prediction_examples": {
+    "sampling_seed": 20261014,
+    "subject_count": 4,
+    "intervals_per_subject": 2,
+    "duration_seconds": 5,
+    "training_fraction": 1.0,
+    "neural_seed": 0
+  },
+  "plot_labels": {
+    "corteg": "CORTEG (HGA + LFS)",
+    "cnn_gru": "CNN-GRU (HGA)",
+    "cnn_gru_late": "CNN-GRU (HGA + LFS)"
+  }
+}

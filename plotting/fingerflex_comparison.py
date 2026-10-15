@@ -50,7 +50,7 @@ STYLES = {
     "corteg": ("#0072B2", "o"),
     "hilo": ("#D55E00", "s"),
     "pls": ("#009E73", "^"),
-    "cnn_gru": ("#CC79A7", "D"),
+    "cnn_gru": ("#009E73", "D"),
     "ridge_early": ("#E69F00", "v"),
     "ridge_late": ("#56B4E9", "P"),
     "ridge_early_binned": ("#0072B2", "o"),

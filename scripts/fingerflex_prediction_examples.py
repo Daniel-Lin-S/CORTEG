@@ -1,6 +1,6 @@
 """Generate matched FingerFlex prediction examples from completed fits.
 
-Input: the portable HGA controls JSON and two existing comparison roots,
+Input: a portable comparison JSON and its comparison roots,
 each with ``index.json``, completed ``reports/summary.json``, and saved
 model fit predictions. Output: eight PNGs per comparison under
 ``plots/prediction_examples/<subject>/window_<n>.png`` and an identical
@@ -33,7 +33,17 @@ from experiments.fingerflex_campaign import split_fit_rows
 from scripts.fingerflex_comparison import DETERMINISTIC_MODELS
 from plotting.fingerflex_prediction_examples import plot_prediction_window
 
-ROOT_COUNT = 2
+MIN_ROOT_COUNT = 1
+
+
+def _comparison_models(config: dict) -> dict[str, list[str]]:
+    """Resolve one direct comparison or several configured groups."""
+    if "groups" in config:
+        return {
+            group["name"]: group["models"]
+            for group in config["groups"].values()
+        }
+    return {config["name"]: config["models"]}
 
 
 def _load_comparison(root: Path, config: dict) -> dict:
@@ -46,8 +56,7 @@ def _load_comparison(root: Path, config: dict) -> dict:
         raise ValueError(f"Comparison is incomplete: {root}.")
     if root.name != f"{index['name']}__{index['semantic_id']}":
         raise ValueError(f"Comparison root identity differs: {root}.")
-    groups = config["groups"]
-    allowed = {group["name"]: group["models"] for group in groups.values()}
+    allowed = _comparison_models(config)
     models = list(index["fit_roots"])
     if allowed.get(index["name"]) != models:
         raise ValueError(f"Unexpected comparison models in {root}.")
@@ -133,12 +142,12 @@ def _selection_manifest(
     }
 
 
-def generate_examples(roots: tuple[Path, Path], config: dict) -> dict:
-    """Render the same random test intervals for two completed groups.
+def generate_examples(roots: tuple[Path, ...], config: dict) -> dict:
+    """Render matched random test intervals for completed groups.
 
     Parameters
     ----------
-    roots : tuple[Path, Path]
+    roots : tuple[Path, ...]
         Existing comparison roots, one for each configured group.
     config : dict
         Portable plot settings, group names, and model labels.
@@ -148,15 +157,18 @@ def generate_examples(roots: tuple[Path, Path], config: dict) -> dict:
     dict
         The common selection manifest written to both roots.
     """
-    if len(roots) != ROOT_COUNT or len(set(roots)) != ROOT_COUNT:
-        raise ValueError("Exactly two distinct comparison roots are needed.")
+    expected_names = set(_comparison_models(config))
+    if len(roots) < MIN_ROOT_COUNT or len(set(roots)) != len(roots):
+        raise ValueError("Distinct comparison roots are required.")
     indexes = [_load_comparison(root, config) for root in roots]
-    expected_names = {group["name"] for group in config["groups"].values()}
     if {index["name"] for index in indexes} != expected_names:
-        raise ValueError("The two comparison groups differ from config.")
-    if indexes[0]["subjects"] != indexes[1]["subjects"] or (
-        indexes[0]["semantics"]["preprocessing_id"]
-        != indexes[1]["semantics"]["preprocessing_id"]
+        raise ValueError("Comparison roots differ from the configuration.")
+    reference = indexes[0]
+    if any(
+        index["subjects"] != reference["subjects"] or
+        index["semantics"]["preprocessing_id"] !=
+        reference["semantics"]["preprocessing_id"]
+        for index in indexes[1:]
     ):
         raise ValueError("Comparison subjects or preprocessing differ.")
     settings = config["prediction_examples"]
@@ -222,13 +234,13 @@ def generate_examples(roots: tuple[Path, Path], config: dict) -> dict:
 
 
 def main() -> None:
-    """Parse existing comparison roots and generate plot-only artifacts."""
+    """Parse completed comparison roots and generate example plots."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config", type=Path,
         default=REPO / "configs" / "fingerflex_hga_controls.json",
     )
-    parser.add_argument("--roots", type=Path, nargs=ROOT_COUNT, required=True)
+    parser.add_argument("--roots", type=Path, nargs="+", required=True)
     arguments = parser.parse_args()
     config = json.loads(arguments.config.read_text())
     roots = tuple(path.resolve() for path in arguments.roots)

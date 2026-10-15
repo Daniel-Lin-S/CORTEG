@@ -418,7 +418,16 @@ def load_comparison_study(path: Path) -> tuple[dict, dict]:
         raise ValueError(
             f"Comparison requires unique supported models: {models}."
         )
-    if "fit_ids" in study and set(study["fit_ids"]) != set(models):
+    sources = study.get("source_comparisons")
+    if sources is not None:
+        if "fit_ids" in study or set(sources) != set(models) or any(
+            not isinstance(value, str) or not value
+            for value in sources.values()
+        ):
+            raise ValueError(
+                "Source comparisons must name each model without fit IDs."
+            )
+    elif "fit_ids" in study and set(study["fit_ids"]) != set(models):
         raise ValueError("Fit IDs must name exactly the selected models.")
     _validate_rules(study["comparison"])
     campaign = Path(study["source_campaign"])
@@ -435,13 +444,58 @@ def load_comparison_study(path: Path) -> tuple[dict, dict]:
             raise ValueError(f"{key} selectors exceed the source campaign.")
     if any(not 0 < value <= 1 for value in study["fractions"]):
         raise ValueError("Comparison fractions must lie in (0, 1].")
-    if "fit_ids" not in study:
+    if sources is None and "fit_ids" not in study:
         study["fit_ids"] = _linear_fusion_fit_ids(study, base)
     return study, base
 
 
+def _source_comparison_root(parent: Path, name: str) -> Path:
+    """Find one saved comparison by its semantic display name."""
+    matches = []
+    for path in parent.glob("*/index.json"):
+        index = json.loads(path.read_text())
+        if index.get("name") == name and (
+            path.parent.name.endswith(f"__{index.get('semantic_id')}")
+        ):
+            matches.append(path.parent)
+    if len(matches) != 1:
+        raise ValueError(
+            f"Expected one saved comparison named {name}; "
+            f"found {len(matches)}."
+        )
+    return matches[0]
+
+
+def _source_fit_roots(study: dict, base: dict) -> dict[str, Path]:
+    """Resolve fit roots from completed comparison references."""
+    parent = Path(base["artifact_base"]) / "comparisons"
+    roots = {}
+    for model, name in study["source_comparisons"].items():
+        source = _source_comparison_root(parent, name)
+        summary = json.loads(
+            (source / "reports" / "summary.json").read_text()
+        )
+        if not summary.get("complete"):
+            raise ValueError(f"Source comparison is incomplete: {source}.")
+        index = json.loads((source / "index.json").read_text())
+        if index["semantics"]["preprocessing_id"] != (
+            preparation_id(base)
+        ) or model not in index["fit_roots"]:
+            raise ValueError(
+                f"Source model or preprocessing differs: {source}."
+            )
+        root = Path(index["fit_roots"][model])
+        saved = json.loads((root / "index.json").read_text())
+        if saved["semantic_id"] != index["semantics"]["fit_ids"][model]:
+            raise ValueError(f"Source fit identity differs: {root}.")
+        roots[model] = root
+    return roots
+
+
 def find_fit_roots(study: dict, base: dict) -> dict[str, Path]:
     """Resolve model roots by derived or recorded semantic identities."""
+    if "source_comparisons" in study:
+        return _source_fit_roots(study, base)
     parent = Path(base["artifact_base"]) / "fits"
     expected_preprocessing = preparation_id(base)
     roots = {}
